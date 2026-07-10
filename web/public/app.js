@@ -1,34 +1,202 @@
 (() => {
   "use strict";
 
+  const SETTINGS_KEY = "wmd-studio-settings-v4";
+  const DRAFT_PREFIX = "wmd-studio-draft-v2:";
+  const COLORS = ["#3f7f6b", "#b75b4a", "#486f9b", "#a47732", "#765899"];
+
   const editor = document.querySelector("#editor");
+  const highlightLayer = document.querySelector("#wmdHighlight");
+  const highlightCode = document.querySelector("#wmdHighlight code");
   const preview = document.querySelector("#preview");
-  const documentList = document.querySelector("#documentList");
+  const workspace = document.querySelector("#workspace");
+  const editorPane = document.querySelector("#editorPane");
+  const previewPane = document.querySelector("#previewZone");
+  const splitResizer = document.querySelector('[data-resize="split"]');
   const documentName = document.querySelector("#documentName");
   const connectionStatus = document.querySelector("#connectionStatus");
   const saveStatus = document.querySelector("#saveStatus");
+  const localSaveStatus = document.querySelector("#localSaveStatus");
   const previewState = document.querySelector("#previewState");
   const warningList = document.querySelector("#warningList");
   const presence = document.querySelector("#presence");
-  const importInput = document.querySelector("#importInput");
-  const workspace = document.querySelector(".workspace");
+  const wordCount = document.querySelector("#wordCount");
   const toast = document.querySelector("#toast");
-  const randomColor = ["#3f7f6b", "#b75b4a", "#486f9b", "#a47732", "#765899"][Math.floor(Math.random() * 5)];
-  const clientId = crypto.randomUUID();
-  const userName = sessionStorage.getItem("wmd-studio-name") || `Guest ${Math.floor(100 + Math.random() * 900)}`;
-  sessionStorage.setItem("wmd-studio-name", userName);
-  let documentId = normalizeDocumentId(new URLSearchParams(location.search).get("doc") || "untitled");
-  let socket;
-  let reconnectTimer;
-  let revision = 0;
-  let serverText = "";
-  let localText = "";
-  let pending = [];
-  let inFlight = null;
-  let compileTimer;
-  let selectionTimer;
-  let newestCompileRequest = 0;
-  let documentReady = false;
+  const panelMenu = document.querySelector("#panelMenu");
+  const panelsButton = document.querySelector("#panelsButton");
+  const settingsDialog = document.querySelector("#settingsDialog");
+  const settingsForm = document.querySelector("#settingsForm");
+  const macroList = document.querySelector("#macroList");
+  const importInput = document.querySelector("#importInput");
+  const documentModeButton = document.querySelector("#documentModeButton");
+  const wmdModeButton = document.querySelector("#wmdModeButton");
+  const mobileEditButton = document.querySelector("#mobileEditButton");
+  const blockStyleControl = document.querySelector("#blockStyleControl");
+  const fontControl = document.querySelector("#fontControl");
+  const sizeIndicator = document.querySelector("#sizeIndicator");
+  const zoomControl = document.querySelector("#zoomControl");
+  const themeMeta = document.querySelector('meta[name="theme-color"]');
+
+  let settings = loadSettings();
+  const state = {
+    clientId: createId(),
+    documentId: normalizeDocumentId(new URLSearchParams(location.search).get("doc") || "untitled"),
+    mode: settings.defaultMode,
+    source: "",
+    serverSource: "",
+    revision: 0,
+    ready: false,
+    dirty: false,
+    pending: [],
+    inFlight: null,
+    users: [],
+    socket: null,
+    socketGeneration: 0,
+    reconnectTimer: null,
+    compileTimer: null,
+    compileController: null,
+    compileGeneration: 0,
+    localSaveTimer: null,
+    selectionTimer: null,
+    canvasSelection: null,
+    canvasText: null,
+    restoreCanvasSelection: false,
+    previewScroll: { left: 0, top: 0 },
+    previewFocus: null,
+    dragging: null,
+    shuttingDown: false,
+    importedSource: null,
+  };
+
+  function createId() {
+    if (globalThis.crypto && typeof globalThis.crypto.randomUUID === "function") return globalThis.crypto.randomUUID();
+    return `wmd-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+  }
+
+  function defaults() {
+    return {
+      username: `Guest ${Math.floor(100 + Math.random() * 900)}`,
+      color: COLORS[Math.floor(Math.random() * COLORS.length)],
+      syncUrl: "",
+      theme: "light",
+      accent: "green",
+      defaultMode: "document",
+      zoom: 100,
+      macros: [{ trigger: "--", replacement: "\u2013" }],
+      panes: { editor: 620 },
+      panels: { editor: true, preview: true },
+    };
+  }
+
+  function loadSettings() {
+    const fallback = defaults();
+    try {
+      const stored = JSON.parse(localStorage.getItem(SETTINGS_KEY));
+      if (!stored || typeof stored !== "object") return fallback;
+      return {
+        ...fallback,
+        ...stored,
+        username: String(stored.username || fallback.username).slice(0, 36),
+        color: /^#[0-9a-f]{6}$/i.test(stored.color || "") ? stored.color : fallback.color,
+        syncUrl: normalizeServerUrl(stored.syncUrl || ""),
+        theme: ["light", "dark", "system"].includes(stored.theme) ? stored.theme : fallback.theme,
+        accent: ["green", "orange", "blue", "graphite"].includes(stored.accent) ? stored.accent : fallback.accent,
+        defaultMode: stored.defaultMode === "wmd" ? "wmd" : "document",
+        zoom: clamp(stored.zoom, 60, 160),
+        macros: normalizeMacros(stored.macros, fallback.macros),
+        panes: { ...fallback.panes, ...(stored.panes || {}) },
+        panels: { ...fallback.panels, ...(stored.panels || {}) },
+      };
+    } catch (_) {
+      return fallback;
+    }
+  }
+
+  function saveSettings() {
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+  }
+
+  function normalizeMacros(value, fallback) {
+    if (!Array.isArray(value)) return fallback;
+    return value
+      .filter((macro) => macro && typeof macro.trigger === "string" && typeof macro.replacement === "string")
+      .map((macro) => ({ trigger: macro.trigger.slice(0, 80), replacement: macro.replacement.slice(0, 200) }))
+      .filter((macro) => macro.trigger && macro.replacement);
+  }
+
+  function normalizeServerUrl(value) {
+    const text = String(value || "").trim();
+    if (!text) return "";
+    try {
+      const url = new URL(text);
+      if (!/^https?:$/.test(url.protocol)) return "";
+      if (location.protocol === "https:" && url.protocol !== "https:") return "";
+      return url.origin;
+    } catch (_) {
+      return "";
+    }
+  }
+
+  function syncBase() {
+    return settings.syncUrl || location.origin;
+  }
+
+  function apiUrl(pathname) {
+    return `${syncBase()}${pathname}`;
+  }
+
+  function collaborationUrl() {
+    const base = new URL(syncBase());
+    base.protocol = base.protocol === "https:" ? "wss:" : "ws:";
+    base.pathname = `${base.pathname.replace(/\/$/, "")}/collaboration`;
+    base.search = "";
+    base.hash = "";
+    return base.toString();
+  }
+
+  function shareUrl() {
+    const url = new URL(`${syncBase()}/`);
+    url.searchParams.set("doc", state.documentId);
+    return url.toString();
+  }
+
+  function draftKey(documentId = state.documentId) {
+    return `${DRAFT_PREFIX}${syncBase()}::${documentId}`;
+  }
+
+  function readDraft(documentId = state.documentId) {
+    try {
+      const draft = JSON.parse(localStorage.getItem(draftKey(documentId)));
+      return draft && typeof draft.source === "string" ? draft : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function scheduleDraftSave() {
+    clearTimeout(state.localSaveTimer);
+    localSaveStatus.textContent = "Saving local copy...";
+    state.localSaveTimer = setTimeout(() => persistDraft(), 160);
+  }
+
+  function persistDraft() {
+    clearTimeout(state.localSaveTimer);
+    state.localSaveTimer = null;
+    try {
+      localStorage.setItem(draftKey(), JSON.stringify({
+        source: state.source,
+        dirty: state.dirty || Boolean(state.pending.length || state.inFlight),
+        updatedAt: Date.now(),
+      }));
+      localSaveStatus.textContent = "Local copy saved";
+    } catch (_) {
+      localSaveStatus.textContent = "Local copy unavailable";
+    }
+  }
+
+  function removeDraft(documentId = state.documentId) {
+    try { localStorage.removeItem(draftKey(documentId)); } catch (_) { /* Local storage may be unavailable. */ }
+  }
 
   function normalizeDocumentId(value) {
     const normalized = String(value || "untitled")
@@ -41,20 +209,20 @@
     return /^[a-z0-9][a-z0-9_-]{0,63}$/.test(normalized) ? normalized : "untitled";
   }
 
-  function escapeHtml(value) {
-    return String(value).replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;" }[character]));
+  function clamp(value, minimum, maximum) {
+    const number = Number(value);
+    return Math.max(minimum, Math.min(maximum, Number.isFinite(number) ? number : minimum));
   }
 
-  function documentTitle(source, fallback) {
-    const match = source.match(/^@title\s+(.+)$/m);
-    return (match && match[1].trim()) || fallback.replace(/[-_]+/g, " ");
+  function escapeHtml(value) {
+    return String(value).replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;" }[character]));
   }
 
   function toastMessage(message) {
     toast.textContent = message;
     toast.classList.add("visible");
     clearTimeout(toastMessage.timer);
-    toastMessage.timer = setTimeout(() => toast.classList.remove("visible"), 2400);
+    toastMessage.timer = setTimeout(() => toast.classList.remove("visible"), 2600);
   }
 
   function appendPart(target, part) {
@@ -70,17 +238,37 @@
   }
 
   function applyOperation(source, operation) {
-    let sourceIndex = 0;
+    let index = 0;
     let output = "";
     for (const part of operation.ops) {
       if (typeof part === "string") output += part;
       else if (part > 0) {
-        output += source.slice(sourceIndex, sourceIndex + part);
-        sourceIndex += part;
-      } else sourceIndex += -part;
+        output += source.slice(index, index + part);
+        index += part;
+      } else {
+        index += -part;
+      }
     }
-    if (sourceIndex !== source.length) throw new Error("The collaboration state needs to resync.");
+    if (index !== source.length) throw new Error("The shared document needs to refresh.");
     return output;
+  }
+
+  function operationFromDiff(before, after) {
+    if (before === after) return null;
+    let prefix = 0;
+    while (prefix < before.length && prefix < after.length && before[prefix] === after[prefix]) prefix += 1;
+    let suffix = 0;
+    while (
+      suffix < before.length - prefix &&
+      suffix < after.length - prefix &&
+      before[before.length - 1 - suffix] === after[after.length - 1 - suffix]
+    ) suffix += 1;
+    const ops = [];
+    appendPart(ops, prefix);
+    appendPart(ops, -(before.length - prefix - suffix));
+    appendPart(ops, after.slice(prefix, after.length - suffix));
+    appendPart(ops, suffix);
+    return { ops };
   }
 
   function consumePart(part, length) {
@@ -88,7 +276,6 @@
     return part > 0 ? part - length : part + length;
   }
 
-  // Returns two operations that preserve both people's edits after a collision.
   function transformOperations(left, right) {
     const leftParts = left.ops.slice();
     const rightParts = right.ops.slice();
@@ -128,188 +315,789 @@
     return [{ ops: leftPrime }, { ops: rightPrime }];
   }
 
-  function operationFromDiff(before, after) {
-    if (before === after) return null;
-    let prefix = 0;
-    while (prefix < before.length && prefix < after.length && before[prefix] === after[prefix]) prefix += 1;
-    let suffix = 0;
-    while (
-      suffix < before.length - prefix &&
-      suffix < after.length - prefix &&
-      before[before.length - 1 - suffix] === after[after.length - 1 - suffix]
-    ) suffix += 1;
-
-    const operations = [];
-    appendPart(operations, prefix);
-    appendPart(operations, -(before.length - prefix - suffix));
-    appendPart(operations, after.slice(prefix, after.length - suffix));
-    appendPart(operations, suffix);
-    return { ops: operations };
+  function resolvedTheme() {
+    if (settings.theme !== "system") return settings.theme;
+    return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
   }
 
-  function transformIndex(index, operation) {
-    let sourceIndex = 0;
-    let targetIndex = 0;
-    for (const part of operation.ops) {
-      if (typeof part === "string") {
-        targetIndex += part.length;
-      } else if (part > 0) {
-        if (index <= sourceIndex + part) return targetIndex + index - sourceIndex;
-        sourceIndex += part;
-        targetIndex += part;
-      } else {
-        const deleted = -part;
-        if (index <= sourceIndex + deleted) return targetIndex;
-        sourceIndex += deleted;
-      }
+  function applyAppearance() {
+    const theme = resolvedTheme();
+    document.body.dataset.theme = theme;
+    document.body.dataset.accent = settings.accent;
+    themeMeta.content = theme === "dark" ? "#101711" : "#f4f1e8";
+    updateToolbarValues();
+    if (state.ready) scheduleCompile(0);
+  }
+
+  function updateToolbarValues() {
+    const baseSize = Number.parseInt(configValue("baseSize", "16px"), 10) || 16;
+    const font = configValue("font", "Arial, sans-serif");
+    sizeIndicator.textContent = String(baseSize);
+    zoomControl.textContent = `${settings.zoom}%`;
+    fontControl.value = [...fontControl.options].some((option) => option.value === font) ? font : "Arial, sans-serif";
+  }
+
+  function configValue(name, fallback) {
+    const match = state.source.match(new RegExp(`^${name}:\\s*(.+)$`, "m"));
+    return match ? match[1].trim() : fallback;
+  }
+
+  function changeConfig(name, value) {
+    const pattern = new RegExp(`^${name}:\\s*.*$`, "m");
+    let next;
+    if (pattern.test(state.source)) next = state.source.replace(pattern, `${name}: ${value}`);
+    else if (/^@config\s*$/m.test(state.source)) next = state.source.replace(/^@config\s*$/m, `@config\n${name}: ${value}`);
+    else next = `@config\n${name}: ${value}\n@endconfig\n\n${state.source}`;
+    changeSource(next, { compile: true });
+  }
+
+  function effectivePanels() {
+    const panels = {
+      editor: state.mode === "wmd" && settings.panels.editor,
+      preview: settings.panels.preview,
+    };
+    // Keep one useful pane visible rather than leaving the workspace blank.
+    if (!panels.editor && !panels.preview) panels.preview = true;
+    return panels;
+  }
+
+  function applyPaneLayout() {
+    const visible = effectivePanels();
+    editorPane.hidden = !visible.editor;
+    previewPane.hidden = !visible.preview;
+    const showPreviewHandle = visible.editor && visible.preview;
+    splitResizer.hidden = !showPreviewHandle;
+    const columns = [];
+    if (visible.editor) {
+      const maxEditorWidth = Math.max(360, workspace.clientWidth - 468);
+      columns.push(`${clamp(settings.panes.editor, 360, maxEditorWidth)}px`);
     }
-    return targetIndex;
+    if (showPreviewHandle) columns.push("8px");
+    if (visible.preview) columns.push("minmax(460px, 1fr)");
+    workspace.style.gridTemplateColumns = columns.length ? columns.join(" ") : "1fr";
+    document.querySelectorAll("[data-panel-toggle]").forEach((input) => {
+      input.checked = Boolean(settings.panels[input.dataset.panelToggle]);
+    });
   }
 
-  function updateDocumentIdentity() {
-    documentName.textContent = documentTitle(localText, documentId);
+  function setPanelMenu(open) {
+    panelMenu.hidden = !open;
+    panelsButton.setAttribute("aria-expanded", String(open));
+  }
+
+  function updateIdentity() {
+    const title = state.source.match(/^@title\s+(.+)$/m);
+    documentName.textContent = title ? title[1].trim() : state.documentId.replace(/[-_]+/g, " ");
     document.title = `${documentName.textContent} | WMD Studio`;
   }
 
-  function setConnectionState(state, label) {
+  function updateWordCount() {
+    const plain = state.source
+      .replace(/^@(config|endconfig|tab|title|var|hidden|toc|include|embed|collapse|endcollapse).*$/gm, "")
+      .replace(/^!(note|tip|info|warning|danger|rule|example|end).*$/gm, "")
+      .replace(/[`*_+=[\]{}()#]/g, " ");
+    const words = plain.trim() ? plain.trim().split(/\s+/).length : 0;
+    wordCount.textContent = `${words.toLocaleString()} word${words === 1 ? "" : "s"}`;
+  }
+
+  function renderSource(options = {}) {
+    // Do not reset the raw textarea while its own input event is being handled.
+    if (state.mode === "wmd") {
+      if (!options.keepEditor && editor.value !== state.source) editor.value = state.source;
+      renderHighlight();
+    }
+    updateIdentity();
+    updateWordCount();
+    updateToolbarValues();
+  }
+
+  function mapOffsetThroughOperation(offset, operation) {
+    const sourceOffset = Math.max(0, Number(offset) || 0);
+    let consumed = 0;
+    let produced = 0;
+
+    for (const part of operation && operation.ops || []) {
+      if (typeof part === "string") {
+        produced += part.length;
+        continue;
+      }
+      if (part > 0) {
+        if (sourceOffset <= consumed + part) return produced + Math.max(0, sourceOffset - consumed);
+        consumed += part;
+        produced += part;
+      } else if (part < 0) {
+        const removed = -part;
+        if (sourceOffset <= consumed + removed) return produced;
+        consumed += removed;
+      }
+    }
+
+    return produced + Math.max(0, sourceOffset - consumed);
+  }
+
+  function captureRawSelection() {
+    if (state.mode !== "wmd" || document.activeElement !== editor) return null;
+    return {
+      start: editor.selectionStart,
+      end: editor.selectionEnd,
+      scrollTop: editor.scrollTop,
+      scrollLeft: editor.scrollLeft,
+    };
+  }
+
+  function restoreRawSelection(selection, operation) {
+    if (!selection) return;
+    const start = clamp(mapOffsetThroughOperation(selection.start, operation), 0, state.source.length);
+    const end = clamp(mapOffsetThroughOperation(selection.end, operation), 0, state.source.length);
+    editor.setSelectionRange(start, end);
+    editor.scrollTop = selection.scrollTop;
+    editor.scrollLeft = selection.scrollLeft;
+  }
+
+  function setConnectionState(kind, label) {
+    connectionStatus.className = `connection-status ${kind}`;
     connectionStatus.textContent = label;
-    connectionStatus.className = `connection-status ${state}`;
   }
 
   function send(message) {
-    if (socket && socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message));
+    if (state.socket && state.socket.readyState === WebSocket.OPEN) state.socket.send(JSON.stringify(message));
   }
 
   function connect() {
-    clearTimeout(reconnectTimer);
-    const protocol = location.protocol === "https:" ? "wss:" : "ws:";
-    setConnectionState("", "Connecting");
-    socket = new WebSocket(`${protocol}//${location.host}/collaboration`);
+    clearTimeout(state.reconnectTimer);
+    const generation = ++state.socketGeneration;
+    if (state.socket && state.socket.readyState < WebSocket.CLOSING) state.socket.close();
+    setConnectionState("", settings.syncUrl ? "Connecting remote" : "Connecting");
+
+    let socket;
+    try {
+      socket = new WebSocket(collaborationUrl());
+    } catch (_) {
+      scheduleReconnect(generation);
+      return;
+    }
+    state.socket = socket;
+
     socket.addEventListener("open", () => {
-      setConnectionState("connected", "Live");
-      send({ type: "join", documentId, name: userName, color: randomColor, clientId });
+      if (generation !== state.socketGeneration || state.shuttingDown) return;
+      setConnectionState("connected", settings.syncUrl ? "Remote live" : "Live");
+      send({ type: "join", documentId: state.documentId, name: settings.username, color: settings.color, clientId: state.clientId });
     });
     socket.addEventListener("message", (event) => {
-      try { handleMessage(JSON.parse(event.data)); } catch (error) { toastMessage(error.message); requestResync(); }
+      if (generation !== state.socketGeneration) return;
+      try { handleSocketMessage(JSON.parse(event.data)); } catch (error) { toastMessage(error.message); requestRefresh(); }
+    });
+    socket.addEventListener("error", () => {
+      if (generation === state.socketGeneration) setConnectionState("problem", "Offline - local copy safe");
     });
     socket.addEventListener("close", () => {
-      setConnectionState("problem", "Reconnecting");
-      reconnectTimer = setTimeout(connect, 1200);
+      if (generation !== state.socketGeneration || state.shuttingDown) return;
+      setConnectionState("problem", "Reconnecting - local copy safe");
+      scheduleReconnect(generation);
     });
-    socket.addEventListener("error", () => setConnectionState("problem", "Offline"));
   }
 
-  function requestResync() {
-    pending = [];
-    inFlight = null;
-    if (socket && socket.readyState === WebSocket.OPEN) {
-      send({ type: "join", documentId, name: userName, color: randomColor, clientId });
+  function scheduleReconnect(generation) {
+    clearTimeout(state.reconnectTimer);
+    state.reconnectTimer = setTimeout(() => {
+      if (!state.shuttingDown && generation === state.socketGeneration) connect();
+    }, 1300);
+  }
+
+  function requestRefresh() {
+    if (state.socket && state.socket.readyState === WebSocket.OPEN) {
+      send({ type: "join", documentId: state.documentId, name: settings.username, color: settings.color, clientId: state.clientId });
     }
   }
 
-  function handleMessage(message) {
+  function handleSocketMessage(message) {
     if (message.type === "document") {
-      documentReady = true;
-      revision = message.document.revision;
-      serverText = message.document.source;
-      localText = serverText;
-      pending = [];
-      inFlight = null;
-      editor.value = localText;
-      updateDocumentIdentity();
-      saveStatus.textContent = "All changes saved";
-      scheduleCompile(true);
-      refreshDocuments();
+      receiveDocument(message.document);
       return;
     }
-
     if (message.type === "operation") {
-      serverText = applyOperation(serverText, message.operation);
-      revision = message.revision;
-      if (message.clientId === clientId && inFlight && message.clientOperationId === inFlight.id) {
-        inFlight = null;
-        saveStatus.textContent = pending.length ? "Saving changes..." : "All changes saved";
-        flushOperations();
-      } else {
-        const selectionStart = editor.selectionStart;
-        const selectionEnd = editor.selectionEnd;
-        let remoteOperation = message.operation;
-        if (inFlight) {
-          [inFlight.operation, remoteOperation] = transformOperations(inFlight.operation, remoteOperation);
-        }
-        pending = pending.map((entry) => {
-          const [localOperation, nextRemoteOperation] = transformOperations(entry.operation, remoteOperation);
-          remoteOperation = nextRemoteOperation;
-          return { ...entry, operation: localOperation };
-        });
-        localText = applyOperation(localText, remoteOperation);
-        editor.value = localText;
-        editor.setSelectionRange(transformIndex(selectionStart, remoteOperation), transformIndex(selectionEnd, remoteOperation));
-        saveStatus.textContent = "Updated by a collaborator";
-        scheduleCompile();
-      }
-      updateDocumentIdentity();
+      receiveOperation(message);
       return;
     }
-
     if (message.type === "presence") {
-      renderPresence(message.users);
+      state.users = message.users || [];
+      renderPresence();
+      sendCanvasCursors();
+      if (state.mode === "wmd") renderHighlight();
       return;
     }
-
     if (message.type === "resync") {
-      serverText = message.document.source;
-      localText = serverText;
-      revision = message.document.revision;
-      pending = [];
-      inFlight = null;
-      editor.value = localText;
-      toastMessage("The document was refreshed from the shared version.");
-      scheduleCompile(true);
+      state.serverSource = message.document.source;
+      state.revision = message.document.revision;
+      requestRefresh();
+      return;
+    }
+    if (message.type === "error") toastMessage(message.message || "The server rejected an edit.");
+  }
+
+  function receiveDocument(document) {
+    const priorLocal = state.source;
+    const draft = readDraft();
+    const restore = state.importedSource || (state.dirty && priorLocal ? priorLocal : draft && draft.dirty ? draft.source : "");
+
+    state.serverSource = document.source;
+    state.revision = document.revision;
+    state.pending = [];
+    state.inFlight = null;
+    state.ready = true;
+    state.importedSource = null;
+
+    if (restore && restore !== document.source) {
+      state.source = restore;
+      state.dirty = true;
+      const operation = operationFromDiff(document.source, restore);
+      if (operation) state.pending.push({ id: createId(), operation });
+      saveStatus.textContent = "Restoring local changes...";
+    } else {
+      state.source = document.source;
+      state.dirty = false;
+      saveStatus.textContent = "All changes saved";
+    }
+    renderSource();
+    persistDraft();
+    scheduleCompile(0);
+    flushOperations();
+  }
+
+  function receiveOperation(message) {
+    state.serverSource = applyOperation(state.serverSource, message.operation);
+    state.revision = message.revision;
+
+    if (message.clientId === state.clientId && state.inFlight && message.clientOperationId === state.inFlight.id) {
+      state.inFlight = null;
+      state.dirty = Boolean(state.pending.length);
+      saveStatus.textContent = state.dirty ? "Saving changes..." : "All changes saved";
+      persistDraft();
+      flushOperations();
       return;
     }
 
-    if (message.type === "error") toastMessage(message.message);
+    try {
+      const rawSelection = captureRawSelection();
+      let incoming = message.operation;
+      if (state.inFlight) [state.inFlight.operation, incoming] = transformOperations(state.inFlight.operation, incoming);
+      state.pending = state.pending.map((entry) => {
+        const [localOperation, remoteOperation] = transformOperations(entry.operation, incoming);
+        incoming = remoteOperation;
+        return { ...entry, operation: localOperation };
+      });
+      state.source = applyOperation(state.source, incoming);
+      if (state.canvasSelection && state.mode === "document") state.restoreCanvasSelection = true;
+      state.dirty = Boolean(state.pending.length || state.inFlight);
+      renderSource();
+      restoreRawSelection(rawSelection, incoming);
+      persistDraft();
+      scheduleCompile(140);
+      saveStatus.textContent = "Updated by a collaborator";
+    } catch (_) {
+      requestRefresh();
+    }
+  }
+
+  function changeSource(nextSource, options = {}) {
+    if (nextSource === state.source) return;
+    const operation = operationFromDiff(state.source, nextSource);
+    state.source = nextSource;
+    state.dirty = true;
+    if (operation && state.ready) state.pending.push({ id: createId(), operation });
+    renderSource({ keepEditor: Boolean(options.keepEditor) });
+    scheduleDraftSave();
+    saveStatus.textContent = state.ready ? "Saving changes..." : "Saved locally - waiting for server";
+    flushOperations();
+    if (options.compile !== false) scheduleCompile();
   }
 
   function flushOperations() {
-    if (!documentReady || inFlight || !pending.length || !socket || socket.readyState !== WebSocket.OPEN) return;
-    inFlight = pending.shift();
+    if (!state.ready || state.inFlight || !state.pending.length || !state.socket || state.socket.readyState !== WebSocket.OPEN) return;
+    state.inFlight = state.pending.shift();
     send({
       type: "operation",
-      baseRevision: revision,
-      clientOperationId: inFlight.id,
-      operation: inFlight.operation,
+      baseRevision: state.revision,
+      clientOperationId: state.inFlight.id,
+      operation: state.inFlight.operation,
     });
   }
 
-  function scheduleCompile(immediate = false) {
-    clearTimeout(compileTimer);
-    compileTimer = setTimeout(compilePreview, immediate ? 0 : 220);
+  function scheduleCompile(delay = 260) {
+    clearTimeout(state.compileTimer);
+    state.compileController?.abort();
+    const generation = ++state.compileGeneration;
+    state.compileTimer = setTimeout(() => compilePreview(generation), delay);
   }
 
-  async function compilePreview() {
-    if (!documentReady) return;
-    const requestId = ++newestCompileRequest;
+  async function compilePreview(generation) {
+    if (!state.source) {
+      preview.srcdoc = "<!doctype html><body></body>";
+      warningList.hidden = true;
+      previewState.textContent = "Waiting for document";
+      return;
+    }
+    const controller = new AbortController();
+    state.compileController = controller;
+    const source = state.source;
     previewState.textContent = "Compiling";
     try {
-      const response = await fetch("/api/compile", {
+      const response = await fetch(apiUrl("/api/compile"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ source: localText }),
+        body: JSON.stringify({ source }),
+        signal: controller.signal,
       });
       const result = await response.json();
       if (!response.ok) throw new Error(result.error || "Compilation failed.");
-      if (requestId !== newestCompileRequest) return;
-      preview.srcdoc = result.html;
+      if (generation !== state.compileGeneration) return;
+      preview.srcdoc = state.mode === "document" ? editableCanvasHtml(themedHtml(result.html)) : themedHtml(result.html);
       renderWarnings(result.warnings || []);
       previewState.textContent = result.warnings && result.warnings.length ? "Warnings" : "Up to date";
     } catch (error) {
-      if (requestId !== newestCompileRequest) return;
-      previewState.textContent = "Error";
-      preview.srcdoc = `<!doctype html><body style="font-family: sans-serif; padding: 2rem; color: #8f3029"><h1>Could not compile this document</h1><pre>${escapeHtml(error.message)}</pre></body>`;
-      renderWarnings([error.message]);
+      if (error.name === "AbortError" || generation !== state.compileGeneration) return;
+      previewState.textContent = "Offline";
+      preview.srcdoc = `<!doctype html><body style="font-family:sans-serif;padding:2rem"><h1>Preview is unavailable</h1><p>${escapeHtml(error.message)}</p><p>Your local source copy is still safe.</p></body>`;
+    } finally {
+      if (state.compileController === controller) state.compileController = null;
     }
+  }
+
+  function themedHtml(html) {
+    const accent = {
+      green: "#245a46",
+      orange: "#a85b2a",
+      blue: "#285f8e",
+      graphite: "#3e4542",
+    }[settings.accent] || "#245a46";
+    const className = [resolvedTheme() === "dark" ? "dark" : "", state.mode === "wmd" ? "wmd-studio-static" : ""].filter(Boolean).join(" ");
+    const staticZoom = state.mode === "wmd" ? `body.wmd-studio-static .layout{zoom:${settings.zoom}%;}` : "";
+    const style = `<style>:root{--link:${accent};--panel-active:${accent}}${staticZoom}</style>`;
+    const themed = html.replace("</head>", `${style}</head>`).replace("<body>", `<body class="${className}">`);
+    return state.mode === "wmd" ? themed.replace("</body>", `${staticPreviewBridge()}</body>`) : themed;
+  }
+
+  function staticPreviewBridge() {
+    return `<script>
+(function() {
+  function post(type, payload) {
+    var message = payload || {};
+    message.channel = 'wmd-studio-preview';
+    message.type = type;
+    parent.postMessage(message, '*');
+  }
+
+  function label(value) {
+    return String(value || '').replace(/^[v>]|\\s+/g, '').trim();
+  }
+
+  function activateSection(section) {
+    if (!section) return;
+    document.querySelectorAll('main > .tab-section').forEach(function(candidate) {
+      candidate.classList.toggle('active', candidate === section);
+    });
+  }
+
+  function reveal(focus) {
+    if (!focus) return;
+    var sectionForTab = focus.tab && Array.prototype.slice.call(document.querySelectorAll('main > .tab-section')).find(function(section) {
+      return label(section.dataset.tabName) === focus.tab;
+    });
+    var scope = sectionForTab || document.querySelector('main');
+    var blocks = Array.prototype.slice.call(scope.querySelectorAll('h1, h2, h3, h4, h5, h6, p, li, blockquote, pre, td, th'));
+    var target = focus.text && blocks.find(function(block) { return label(block.textContent) === focus.text; });
+    if (!target && focus.text) target = blocks.find(function(block) { return label(block.textContent).indexOf(focus.text) !== -1; });
+    if (!target && focus.heading) target = blocks.find(function(block) { return /^H[1-6]$/.test(block.tagName) && label(block.textContent) === focus.heading; });
+    if (!target) return;
+    activateSection(target.closest('.tab-section'));
+    requestAnimationFrame(function() {
+      var rect = target.getBoundingClientRect();
+      if (rect.bottom > 0 && rect.top < window.innerHeight) return;
+      target.scrollIntoView({ behavior: 'auto', block: 'center' });
+    });
+  }
+
+  function followAnchor(href) {
+    var id = String(href || '').slice(1);
+    try { id = decodeURIComponent(id); } catch (_) {}
+    var target = document.getElementById(id);
+    if (!target) return;
+    activateSection(target.closest('.tab-section'));
+    requestAnimationFrame(function() {
+      target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
+  }
+
+  document.addEventListener('click', function(event) {
+    var target = event.target && (event.target.nodeType === Node.ELEMENT_NODE ? event.target : event.target.parentElement);
+    var link = target && target.closest('a[href]');
+    if (!link) return;
+    event.preventDefault();
+    event.stopPropagation();
+    var href = link.getAttribute('href') || '';
+    if (href.charAt(0) === '#') followAnchor(href);
+  }, true);
+  document.addEventListener('dblclick', function(event) {
+    var target = event.target && (event.target.nodeType === Node.ELEMENT_NODE ? event.target : event.target.parentElement);
+    var link = target && target.closest('a[href]');
+    if (!link) return;
+    event.preventDefault();
+    event.stopPropagation();
+    var href = link.getAttribute('href') || '';
+    if (href.charAt(0) === '#') return followAnchor(href);
+    try {
+      var destinationUrl = new URL(href, document.baseURI);
+      if (['http:', 'https:', 'mailto:', 'tel:'].indexOf(destinationUrl.protocol) !== -1) {
+        window.open(destinationUrl.href, '_blank', 'noopener,noreferrer');
+      }
+    } catch (_) {}
+  }, true);
+
+  window.addEventListener('scroll', function() {
+    post('scroll', { left: window.scrollX, top: window.scrollY });
+  }, { passive: true });
+  window.addEventListener('message', function(event) {
+    var data = event.data || {};
+    if (data.channel !== 'wmd-studio-preview' || data.type !== 'state') return;
+    var scroll = data.scroll || {};
+    window.scrollTo(Number(scroll.left) || 0, Number(scroll.top) || 0);
+    reveal(data.focus);
+  });
+  post('ready', {});
+})();
+</script>`;
+  }
+
+  function editableCanvasHtml(html) {
+    const bridge = `
+<style>
+  .layout { display: block !important; min-height: 100vh; }
+  .layout > .sidebar { display: none !important; }
+  main { max-width: min(980px, calc(100vw - 48px)); margin: 0 auto; padding: 42px 0 80px; }
+  .wmd-studio-duplicate-title { display: none !important; }
+  main.wmd-studio-editable { min-height: calc(100vh - 32px); outline: none; cursor: text; }
+  main.wmd-studio-editable:focus { box-shadow: inset 3px 0 0 #d69a3e; }
+  .wmd-studio-tabs { position: sticky; top: 0; z-index: 5; display: flex; gap: 7px; padding: 12px max(24px, calc((100vw - 980px) / 2)); overflow-x: auto; background: color-mix(in srgb, var(--panel) 92%, transparent); border-bottom: 1px solid var(--border); }
+  .wmd-studio-tabs button { border: 1px solid var(--border); border-radius: 7px; padding: 6px 10px; color: var(--text); background: var(--bg); font: 700 12px system-ui, sans-serif; cursor: pointer; white-space: nowrap; }
+  .wmd-studio-tabs button.active { color: var(--panel-active-text); background: var(--panel-active); border-color: var(--panel-active); }
+  .wmd-studio-cursor { display:inline-block;width:2px;height:1.25em;margin:-0.1em 0;vertical-align:text-bottom;background:var(--wmd-cursor,#b9483c);position:relative;pointer-events:none; }
+  .wmd-studio-cursor::after { content:attr(data-name);position:absolute;left:-2px;bottom:100%;padding:2px 5px;border-radius:4px;color:white;background:var(--wmd-cursor,#b9483c);font:700 10px sans-serif;white-space:nowrap; }
+</style>
+<script>
+(function() {
+  var main = document.querySelector('main');
+  var macros = [];
+  if (!main) return;
+  var canvas = main.closest('.layout') || main;
+  document.body.classList.add('wmd-studio-editing');
+  main.contentEditable = 'true';
+  main.spellcheck = true;
+  main.classList.add('wmd-studio-editable');
+  document.querySelectorAll('.heading-collapse-marker').forEach(function(marker) { marker.remove(); });
+  document.querySelectorAll('.collapsible-heading').forEach(function(heading) { heading.classList.remove('collapsible-heading'); });
+  document.querySelectorAll('.tab-title').forEach(function(title) {
+    var duplicate = title.nextElementSibling;
+    if (duplicate && duplicate.tagName === 'H1' && duplicate.textContent.trim() === title.textContent.trim()) {
+      duplicate.classList.add('wmd-studio-duplicate-title');
+    }
+  });
+
+  var tabBar = null;
+  function refreshTabBar() {
+    var sections = Array.prototype.slice.call(main.querySelectorAll(':scope > section.tab-section'));
+    if (sections.length <= 1) return;
+    if (!tabBar) {
+      tabBar = document.createElement('nav');
+      tabBar.className = 'wmd-studio-tabs';
+      tabBar.contentEditable = 'false';
+      main.parentNode.insertBefore(tabBar, main);
+    }
+    tabBar.replaceChildren();
+    sections.forEach(function(section, index) {
+      var button = document.createElement('button');
+      button.type = 'button';
+      button.textContent = section.dataset.tabName || 'Tab ' + (index + 1);
+      button.classList.toggle('active', section.classList.contains('active'));
+      button.addEventListener('click', function() {
+        sections.forEach(function(candidate) { candidate.classList.remove('active'); });
+        tabBar.querySelectorAll('button').forEach(function(candidate) { candidate.classList.remove('active'); });
+        section.classList.add('active');
+        button.classList.add('active');
+      });
+      tabBar.appendChild(button);
+    });
+  }
+  refreshTabBar();
+
+  function post(type, payload) {
+    var message = payload || {};
+    message.channel = 'wmd-studio-canvas';
+    message.type = type;
+    parent.postMessage(message, '*');
+  }
+
+  function offsetFor(node, offset) {
+    var range = document.createRange();
+    range.selectNodeContents(main);
+    try { range.setEnd(node, offset); } catch (_) { return 0; }
+    return range.toString().length;
+  }
+
+  function selectionInfo() {
+    var selection = window.getSelection();
+    if (!selection || !main.contains(selection.anchorNode)) return { start: 0, end: 0 };
+    return { start: offsetFor(selection.anchorNode, selection.anchorOffset), end: offsetFor(selection.focusNode, selection.focusOffset) };
+  }
+
+  function findMacro(before) {
+    return macros.filter(function(macro) { return macro.trigger && before.endsWith(macro.trigger); }).sort(function(a, b) { return b.trigger.length - a.trigger.length; })[0];
+  }
+
+  function expandMacro() {
+    var selection = window.getSelection();
+    if (!selection || !selection.isCollapsed || !main.contains(selection.anchorNode) || selection.anchorNode.nodeType !== Node.TEXT_NODE) return;
+    var node = selection.anchorNode;
+    var offset = selection.anchorOffset;
+    var macro = findMacro(node.data.slice(0, offset));
+    if (!macro) return;
+    var start = offset - macro.trigger.length;
+    node.data = node.data.slice(0, start) + macro.replacement + node.data.slice(offset);
+    var range = document.createRange();
+    range.setStart(node, start + macro.replacement.length);
+    range.collapse(true);
+    selection.removeAllRanges();
+    selection.addRange(range);
+  }
+
+  function notifyInput() {
+    post('input', { html: main.innerHTML, selection: selectionInfo(), text: main.textContent });
+  }
+
+  function clearCursors() { document.querySelectorAll('.wmd-studio-cursor').forEach(function(cursor) { cursor.remove(); }); }
+
+  function addCursor(user) {
+    var target = Math.max(0, Math.min(Number(user.selection.end) || 0, main.textContent.length));
+    var walker = document.createTreeWalker(main, NodeFilter.SHOW_TEXT, { acceptNode: function(node) {
+      return node.parentElement && node.parentElement.closest('.wmd-studio-cursor') ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT;
+    }});
+    var count = 0;
+    var node = walker.nextNode();
+    while (node) {
+      if (target <= count + node.data.length) {
+        var range = document.createRange();
+        range.setStart(node, target - count);
+        range.collapse(true);
+        var cursor = document.createElement('span');
+        cursor.className = 'wmd-studio-cursor';
+        cursor.contentEditable = 'false';
+        cursor.dataset.name = user.name || 'Collaborator';
+        cursor.style.setProperty('--wmd-cursor', user.color || '#b9483c');
+        range.insertNode(cursor);
+        return;
+      }
+      count += node.data.length;
+      node = walker.nextNode();
+    }
+  }
+
+  function textPosition(target) {
+    var offset = Math.max(0, Math.min(Number(target) || 0, main.textContent.length));
+    var walker = document.createTreeWalker(main, NodeFilter.SHOW_TEXT, { acceptNode: function(node) {
+      return node.parentElement && node.parentElement.closest('.wmd-studio-cursor') ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT;
+    }});
+    var count = 0;
+    var node = walker.nextNode();
+    while (node) {
+      if (offset <= count + node.data.length) return { node: node, offset: offset - count };
+      count += node.data.length;
+      node = walker.nextNode();
+    }
+    return { node: main, offset: main.childNodes.length };
+  }
+
+  function restoreSelection(info) {
+    if (!info) return;
+    var start = textPosition(info.start);
+    var end = textPosition(info.end);
+    var range = document.createRange();
+    try {
+      range.setStart(start.node, start.offset);
+      range.setEnd(end.node, end.offset);
+      var selection = window.getSelection();
+      selection.removeAllRanges();
+      selection.addRange(range);
+      main.focus();
+    } catch (_) {}
+  }
+
+  function command(data) {
+    main.focus();
+    if (data.command === 'insert') {
+      if (data.kind === 'link') document.execCommand('createLink', false, data.value || 'https://example.com');
+      if (data.kind === 'image') document.execCommand('insertImage', false, data.value || '');
+      if (data.kind === 'list') document.execCommand('insertUnorderedList');
+      if (data.kind === 'callout') document.execCommand('insertHTML', false, '<div class="callout callout-note"><div class="callout-title">A helpful note</div><div class="callout-body"><p>Write the note here.</p></div></div><p><br></p>');
+      if (data.kind === 'tab') {
+        main.querySelectorAll(':scope > section.tab-section').forEach(function(candidate) { candidate.classList.remove('active'); });
+        var section = document.createElement('section');
+        section.className = 'tab-section active';
+        section.dataset.tabName = 'New tab';
+        section.dataset.tabHidden = 'false';
+        section.innerHTML = '<h1 class="tab-title">New tab</h1><h1>New tab</h1><p>Start writing here.</p>';
+        main.appendChild(section);
+        refreshTabBar();
+      }
+    } else if (data.command === 'formatBlock') {
+      document.execCommand('formatBlock', false, data.value || 'p');
+    } else if (data.command === 'highlight') {
+      document.execCommand('hiliteColor', false, data.value || '#fff0a6');
+    } else if (data.command) {
+      document.execCommand(data.command, false, data.value || null);
+    }
+    notifyInput();
+  }
+
+  main.addEventListener('input', function() { expandMacro(); notifyInput(); });
+  main.addEventListener('click', function(event) { event.stopPropagation(); post('selection', selectionInfo()); }, true);
+  main.addEventListener('dblclick', function(event) {
+    var target = event.target && (event.target.nodeType === Node.ELEMENT_NODE ? event.target : event.target.parentElement);
+    var link = target && target.closest('a[href]');
+    if (!link) return;
+    event.preventDefault();
+    event.stopPropagation();
+    var href = link.getAttribute('href') || '';
+    if (href.startsWith('#')) {
+      var destination = document.getElementById(href.slice(1));
+      var section = destination && destination.closest('.tab-section');
+      if (section) {
+        main.querySelectorAll(':scope > .tab-section').forEach(function(candidate) { candidate.classList.toggle('active', candidate === section); });
+        refreshTabBar();
+      }
+      if (destination) destination.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      return;
+    }
+    try {
+      var destinationUrl = new URL(href, document.baseURI);
+      if (['http:', 'https:', 'mailto:', 'tel:'].indexOf(destinationUrl.protocol) !== -1) {
+        window.open(destinationUrl.href, '_blank', 'noopener,noreferrer');
+      }
+    } catch (_) {}
+  }, true);
+  main.addEventListener('keyup', function() { post('selection', selectionInfo()); });
+  main.addEventListener('keydown', function(event) {
+    if (event.key === 'Enter' && !event.isComposing) {
+      event.preventDefault();
+      document.execCommand(event.shiftKey ? 'insertLineBreak' : 'insertParagraph');
+      notifyInput();
+      return;
+    }
+    if (!(event.ctrlKey || event.metaKey)) return;
+    var key = event.key.toLowerCase();
+    if (key === 'b') { event.preventDefault(); command({ command: 'bold' }); }
+    if (key === 'i') { event.preventDefault(); command({ command: 'italic' }); }
+    if (key === 'u') { event.preventDefault(); command({ command: 'underline' }); }
+    if (key === 'k') { event.preventDefault(); post('request-link', {}); }
+  });
+  document.addEventListener('selectionchange', function() {
+    var selection = window.getSelection();
+    if (selection && main.contains(selection.anchorNode)) post('selection', selectionInfo());
+  });
+  window.addEventListener('scroll', function() {
+    post('scroll', { left: window.scrollX, top: window.scrollY });
+  }, { passive: true });
+  window.addEventListener('message', function(event) {
+    var data = event.data || {};
+    if (data.channel !== 'wmd-studio-canvas') return;
+    if (data.type === 'state') {
+      macros = Array.isArray(data.macros) ? data.macros : [];
+      canvas.style.zoom = String(Number(data.zoom) || 100) + '%';
+      restoreSelection(data.selection);
+      if (data.scroll) {
+        requestAnimationFrame(function() {
+          window.scrollTo(Number(data.scroll.left) || 0, Number(data.scroll.top) || 0);
+        });
+      }
+    }
+    if (data.type === 'command') command(data);
+    if (data.type === 'cursors') {
+      clearCursors();
+      (data.users || []).slice().sort(function(a, b) { return (b.selection.end || 0) - (a.selection.end || 0); }).forEach(addCursor);
+    }
+  });
+  post('ready', { text: main.textContent });
+})();
+</script>`;
+    return html.replace("</body>", `${bridge}</body>`);
+  }
+
+  function canvasHtmlToWmd(html) {
+    const documentFragment = new DOMParser().parseFromString(`<main>${html}</main>`, "text/html");
+    const root = documentFragment.querySelector("main");
+    const sections = [...root.children].filter((child) => child.matches && child.matches("section.tab-section"));
+    if (!sections.length) return state.source;
+    const preambleMatch = state.source.match(/^[\s\S]*?(?=^@tab\b)/m);
+    const preamble = preambleMatch ? preambleMatch[0].trim() : "";
+    const tabs = sections.map((section) => {
+      const name = section.dataset.tabName || "Home";
+      const hidden = section.dataset.tabHidden === "true" ? " {hidden}" : "";
+      const blocks = [...section.children].map(serializeCanvasBlock).filter(Boolean);
+      return `@tab ${name}${hidden}\n${blocks.join("\n\n")}`;
+    });
+    return `${preamble}${preamble ? "\n\n" : ""}${tabs.join("\n\n")}\n`;
+  }
+
+  function serializeCanvasBlock(element) {
+    if (element.classList.contains("wmd-studio-cursor") || element.classList.contains("warning-panel") || element.classList.contains("wmd-studio-duplicate-title")) return "";
+    if (element.classList.contains("tab-title")) return `@title ${serializeCanvasInline(element)}`;
+    if (element.classList.contains("toc")) return "@toc";
+    if (element.classList.contains("callout")) {
+      const type = [...element.classList].find((name) => name.startsWith("callout-")) || "callout-note";
+      const title = element.querySelector(".callout-title");
+      const body = element.querySelector(".callout-body");
+      const content = body ? [...body.children].map(serializeCanvasBlock).filter(Boolean).join("\n\n") : "";
+      return `!${type.replace("callout-", "")}${title ? ` ${serializeCanvasInline(title)}` : ""}\n${content}\n!end`;
+    }
+    if (element.matches("details.collapse")) {
+      const summary = element.querySelector("summary");
+      const body = element.querySelector(".collapse-body");
+      const content = body ? [...body.children].map(serializeCanvasBlock).filter(Boolean).join("\n\n") : "";
+      return `@collapse ${summary ? serializeCanvasInline(summary) : "Details"}\n${content}\n@endcollapse`;
+    }
+    if (/^H[1-6]$/.test(element.tagName)) return `${"#".repeat(Number(element.tagName.slice(1)))} ${serializeCanvasInline(element)}`;
+    if (element.tagName === "P") return serializeCanvasInline(element);
+    if (element.tagName === "BLOCKQUOTE") return serializeCanvasInline(element).split("\n").map((line) => `> ${line}`).join("\n");
+    if (element.tagName === "UL" || element.tagName === "OL") {
+      return [...element.children].filter((child) => child.tagName === "LI")
+        .map((item, index) => `${element.tagName === "OL" ? `${index + 1}.` : "-"} ${serializeCanvasInline(item)}`)
+        .join("\n");
+    }
+    if (element.tagName === "PRE") return `\`\`\`\n${element.textContent.replace(/\n$/, "")}\n\`\`\``;
+    if (element.tagName === "HR") return "---";
+    if (element.tagName === "DIV") {
+      const children = [...element.children].filter((child) => /^(P|DIV|H[1-6]|UL|OL|BLOCKQUOTE|PRE|DETAILS)$/.test(child.tagName));
+      return children.length ? children.map(serializeCanvasBlock).filter(Boolean).join("\n\n") : serializeCanvasInline(element);
+    }
+    return serializeCanvasInline(element);
+  }
+
+  function serializeCanvasInline(node) {
+    const walk = (current) => {
+      if (current.nodeType === Node.TEXT_NODE) return current.data;
+      if (current.nodeType !== Node.ELEMENT_NODE) return "";
+      if (current.classList.contains("wmd-studio-cursor") || current.classList.contains("heading-collapse-marker")) return "";
+      const children = [...current.childNodes].map(walk).join("");
+      if (current.tagName === "STRONG" || current.tagName === "B") return `*${children}*`;
+      if (current.tagName === "EM" || current.tagName === "I") return `_${children}_`;
+      if (current.tagName === "U") return `++${children}++`;
+      if (current.tagName === "MARK") return `=${children}=`;
+      if (current.tagName === "SPAN" && /background-color/i.test(current.getAttribute("style") || "")) return `=${children}=`;
+      if (current.tagName === "CODE") return `\`${children}\``;
+      if (current.tagName === "A") return `[${children}](${current.getAttribute("href") || ""})`;
+      if (current.tagName === "IMG") return `![${current.getAttribute("alt") || "image"}](${current.getAttribute("src") || ""})`;
+      if (current.tagName === "BR") return "\n";
+      return children;
+    };
+    return [...node.childNodes].map(walk).join("").replace(/\u200b/g, "").trim();
   }
 
   function renderWarnings(warnings) {
@@ -317,156 +1105,372 @@
     warningList.innerHTML = warnings.length ? `<ul>${warnings.map((warning) => `<li>${escapeHtml(warning)}</li>`).join("")}</ul>` : "";
   }
 
-  function renderPresence(users) {
-    presence.replaceChildren();
-    users.slice(0, 8).forEach((user) => {
-      const avatar = document.querySelector("#userTemplate").content.firstElementChild.cloneNode(true);
-      const initials = user.name.split(/\s+/).map((part) => part[0]).join("").slice(0, 2).toUpperCase();
-      avatar.textContent = initials || "G";
-      avatar.title = user.id === clientId ? `${user.name} (you)` : `${user.name} is editing`;
-      avatar.style.background = user.color || "#3f7f6b";
-      presence.append(avatar);
+  function setMode(mode, focus = false) {
+    state.mode = mode === "wmd" ? "wmd" : "document";
+    const documentMode = state.mode === "document";
+    documentModeButton.setAttribute("aria-pressed", String(documentMode));
+    wmdModeButton.setAttribute("aria-pressed", String(!documentMode));
+    mobileEditButton.textContent = documentMode ? "WMD" : "Edit";
+    workspace.classList.toggle("show-preview", documentMode);
+    editorPane.hidden = documentMode;
+    rawEditorVisible(!documentMode);
+    applyPaneLayout();
+    if (documentMode) scheduleCompile(0);
+    else {
+      renderSource();
+      // Canvas edits intentionally avoid an iframe refresh while typing. Recompile when leaving it.
+      scheduleCompile(0);
+      if (focus) editor.focus();
+    }
+  }
+
+  function rawEditorVisible(visible) {
+    document.querySelector("#rawEditorShell").hidden = !visible;
+  }
+
+  function renderHighlight() {
+    const users = state.users.filter((user) => user.id !== state.clientId && user.selection && user.selection.mode === "wmd");
+    let decorated = state.source;
+    const markers = new Map();
+    users.sort((left, right) => right.selection.end - left.selection.end).forEach((user, index) => {
+      const position = clamp(user.selection.end, 0, decorated.length);
+      decorated = `${decorated.slice(0, position)}\u0000${index}\u0000${decorated.slice(position)}`;
+      markers.set(index, user);
+    });
+    let inFence = false;
+    const html = decorated.split("\n").map((line) => {
+      if (/^\s*```/.test(line)) { inFence = !inFence; return `<span class="syntax-code">${escapeHtml(line)}</span>`; }
+      if (inFence) return `<span class="syntax-code">${escapeHtml(line)}</span>`;
+      if (/^\s*@(config|endconfig|tab|title|var|hidden|include|embed|toc|collapse|endcollapse)\b/.test(line)) return `<span class="syntax-directive">${escapeHtml(line)}</span>`;
+      if (/^\s*!(note|tip|info|warning|danger|rule|example|end)\b/.test(line)) return `<span class="syntax-callout">${escapeHtml(line)}</span>`;
+      const heading = line.match(/^(#{1,6})(\s+.*)$/);
+      if (heading) return `<span class="syntax-heading-mark">${escapeHtml(heading[1])}</span><span class="syntax-heading">${escapeHtml(heading[2])}</span>`;
+      if (/^\s*([-+*]|\d+\.)\s+/.test(line)) return `<span class="syntax-list">${inlineHighlight(line)}</span>`;
+      if (/^\s*>/.test(line)) return `<span class="syntax-quote">${inlineHighlight(line)}</span>`;
+      return inlineHighlight(line);
+    }).join("\n");
+    highlightCode.innerHTML = html.replace(/\u0000(\d+)\u0000/g, (_, index) => {
+      const user = markers.get(Number(index));
+      return user ? `<span class="remote-source-cursor" style="--cursor-color:${escapeHtml(user.color || "#b9483c")}" data-name="${escapeHtml(user.name)}"></span>` : "";
     });
   }
 
-  async function refreshDocuments() {
-    try {
-      const response = await fetch("/api/documents");
-      const { documents } = await response.json();
-      documentList.replaceChildren();
-      documents.forEach((item) => {
-        const button = document.createElement("button");
-        button.type = "button";
-        button.textContent = item.title;
-        button.title = item.id;
-        if (item.id === documentId) button.classList.add("active");
-        button.addEventListener("click", () => openDocument(item.id));
-        documentList.append(button);
-      });
-    } catch (_) {
-      // Collaboration still works if the document list briefly cannot refresh.
+  function inlineHighlight(source) {
+    const tokens = /(\[\[[^\]]+\]\]|\[[^\]]+\]\([^\)]+\)|\{\{[A-Za-z][\w-]*\}\}|`[^`\n]*`|===[^=\n]+===|==[^=\n]+==|=[^=\n]+=|\+\+[^+\n]+\+\+|\*\*[^*\n]+\*\*|\*[^*\n]+\*|_[^_\n]+_)/g;
+    let output = "";
+    let position = 0;
+    for (const match of source.matchAll(tokens)) {
+      output += escapeHtml(source.slice(position, match.index));
+      const token = match[0];
+      let className = "syntax-link";
+      if (token.startsWith("{{")) className = "syntax-variable";
+      else if (token.startsWith("`")) className = "syntax-inline-code";
+      else if (token.startsWith("=")) className = "syntax-highlight";
+      else if (token.startsWith("++")) className = "syntax-underline";
+      else if (token.startsWith("*")) className = "syntax-bold";
+      else if (token.startsWith("_")) className = "syntax-italic";
+      output += `<span class="${className}">${escapeHtml(token)}</span>`;
+      position = match.index + token.length;
     }
+    return output + escapeHtml(source.slice(position));
   }
 
-  function openDocument(nextId) {
-    const normalizedId = normalizeDocumentId(nextId);
-    if (normalizedId === documentId) return;
-    documentId = normalizedId;
-    documentReady = false;
-    pending = [];
-    inFlight = null;
-    const url = new URL(location.href);
-    url.searchParams.set("doc", documentId);
-    history.pushState({}, "", url);
-    editor.value = "";
-    documentName.textContent = "Loading...";
-    saveStatus.textContent = "Loading shared document...";
-    send({ type: "join", documentId, name: userName, color: randomColor, clientId });
+  function findMacro(beforeText) {
+    return settings.macros.filter((macro) => beforeText.endsWith(macro.trigger)).sort((left, right) => right.trigger.length - left.trigger.length)[0] || null;
   }
 
-  function replaceSelection(before, selected, after, selectionOffset = 0) {
+  function expandRawMacro() {
+    if (editor.selectionStart !== editor.selectionEnd) return;
+    const cursor = editor.selectionStart;
+    const macro = findMacro(editor.value.slice(0, cursor));
+    if (!macro) return;
+    const start = cursor - macro.trigger.length;
+    editor.setRangeText(macro.replacement, start, cursor, "end");
+    editor.setSelectionRange(start + macro.replacement.length, start + macro.replacement.length);
+  }
+
+  function previewText(value) {
+    return String(value || "")
+      .replace(/\[\[([^\]|]+)(?:#[^\]|]+)?(?:\|([^\]]+))?\]\]/g, (_, target, label) => label || target)
+      .replace(/^\s*(?:[-+*]|\d+\.)\s+/, "")
+      .replace(/^\s*>\s?/, "")
+      .replace(/[`*_+=]/g, "")
+      .trim();
+  }
+
+  function rawPreviewFocus() {
+    const lines = editor.value.slice(0, editor.selectionStart).split("\n");
+    const currentLine = lines[lines.length - 1] || "";
+    let heading = "";
+    let tab = "";
+
+    for (let index = lines.length - 1; index >= 0; index -= 1) {
+      if (!heading) {
+        const headingMatch = lines[index].match(/^#{1,6}\s+(.+)$/);
+        if (headingMatch) heading = previewText(headingMatch[1]);
+      }
+      const tabMatch = lines[index].match(/^@tab\s+(.+?)(?:\s+\{hidden\})?\s*$/);
+      if (tabMatch) {
+        tab = previewText(tabMatch[1]);
+        break;
+      }
+    }
+
+    const text = /^[\s@!`-]*$/.test(currentLine) ? "" : previewText(currentLine);
+    return heading || text ? { heading, tab, text } : null;
+  }
+
+  function onRawInput() {
+    expandRawMacro();
+    state.previewFocus = rawPreviewFocus();
+    changeSource(editor.value, { compile: true, keepEditor: true });
+  }
+
+  function wrapRaw(marker) {
     const start = editor.selectionStart;
     const end = editor.selectionEnd;
-    const replacement = `${before}${selected}${after}`;
-    editor.setRangeText(replacement, start, end, "end");
-    const cursor = start + before.length + selected.length + selectionOffset;
-    editor.setSelectionRange(cursor, cursor);
-    editor.dispatchEvent(new Event("input", { bubbles: true }));
+    const selected = editor.value.slice(start, end) || "text";
+    editor.setRangeText(`${marker}${selected}${marker}`, start, end, "end");
+    editor.setSelectionRange(start + marker.length, start + marker.length + selected.length);
+    onRawInput();
     editor.focus();
   }
 
-  function wrapSelection(marker) {
-    const start = editor.selectionStart;
-    const end = editor.selectionEnd;
-    if (start === end) {
-      editor.setRangeText(`${marker}text${marker}`, start, end, "end");
-      editor.setSelectionRange(start + marker.length, start + marker.length + 4);
-      editor.dispatchEvent(new Event("input", { bubbles: true }));
-      editor.focus();
-      return;
-    }
-    replaceSelection(marker, editor.value.slice(start, end), marker);
-  }
-
-  function insertTemplate(type) {
+  function insertRaw(kind) {
     const templates = {
       link: ["[link text](https://example.com)", 1, 10],
+      image: ["![image description](https://example.com/image.png)", 2, 19],
       heading: ["\n## New heading\n", 4, 15],
       list: ["\n- List item\n", 3, 12],
       callout: ["\n!note A helpful note\nWrite the note here.\n!end\n", 7, 20],
-      tab: ["\n---\n\n@tab New tab\n@title New tab\n\n# New tab\n", 10, 17],
+      tab: ["\n@tab New tab\n@title New tab\n\n# New tab\n", 6, 13],
     };
-    const [text, startOffset, endOffset] = templates[type];
+    const [text, startOffset, endOffset] = templates[kind];
     const start = editor.selectionStart;
     editor.setRangeText(text, start, editor.selectionEnd, "end");
     editor.setSelectionRange(start + startOffset, start + endOffset);
-    editor.dispatchEvent(new Event("input", { bubbles: true }));
+    onRawInput();
     editor.focus();
   }
 
-  function handleSmartDelimiter(event) {
-    if (!["*", "_", "=", "`"].includes(event.key) || event.ctrlKey || event.metaKey || event.altKey) return false;
+  function onRawKeydown(event) {
+    if (event.key === "Enter" && !event.isComposing) {
+      event.preventDefault();
+      editor.setRangeText("\n", editor.selectionStart, editor.selectionEnd, "end");
+      onRawInput();
+      scheduleRawSelection();
+      return;
+    }
+    if (event.ctrlKey || event.metaKey) {
+      const key = event.key.toLowerCase();
+      if (key === "b") { event.preventDefault(); wrapRaw("*"); return; }
+      if (key === "i") { event.preventDefault(); wrapRaw("_"); return; }
+      if (key === "u") { event.preventDefault(); wrapRaw("++"); return; }
+      if (key === "k") { event.preventDefault(); insertRaw("link"); return; }
+    }
+    if (!['*', '_', '=', '`'].includes(event.key) || event.ctrlKey || event.metaKey || event.altKey) return;
     const start = editor.selectionStart;
     const end = editor.selectionEnd;
     const before = editor.value[start - 1] || "";
     const after = editor.value[end] || "";
-    if (start !== end) {
-      event.preventDefault();
-      replaceSelection(event.key, editor.value.slice(start, end), event.key);
-      return true;
-    }
-    if (/\w/.test(before) || /\w/.test(after)) return false;
+    if (start !== end) { event.preventDefault(); wrapRaw(event.key); return; }
+    if (/\w/.test(before) || /\w/.test(after)) return;
     event.preventDefault();
-    replaceSelection(event.key, "", event.key);
-    return true;
+    editor.setRangeText(`${event.key}${event.key}`, start, end, "end");
+    editor.setSelectionRange(start + 1, start + 1);
+    onRawInput();
   }
 
-  function downloadDocument() {
-    const blob = new Blob([localText], { type: "text/plain;charset=utf-8" });
-    const link = document.createElement("a");
-    link.href = URL.createObjectURL(blob);
-    link.download = `${documentId}.wmd`;
-    link.click();
-    setTimeout(() => URL.revokeObjectURL(link.href), 0);
+  function scheduleRawSelection() {
+    clearTimeout(state.selectionTimer);
+    state.selectionTimer = setTimeout(() => {
+      if (state.ready && state.mode === "wmd" && document.activeElement === editor) {
+        send({ type: "selection", mode: "wmd", start: editor.selectionStart, end: editor.selectionEnd });
+      }
+    }, 90);
+  }
+
+  function postCanvas(message) {
+    if (preview.contentWindow) preview.contentWindow.postMessage({ channel: "wmd-studio-canvas", ...message }, "*");
+  }
+
+  function postPreview(message) {
+    if (preview.contentWindow) preview.contentWindow.postMessage({ channel: "wmd-studio-preview", ...message }, "*");
+  }
+
+  function sendPreviewState() {
+    if (state.mode !== "wmd") return;
+    postPreview({ type: "state", scroll: state.previewScroll, focus: state.previewFocus });
+    state.previewFocus = null;
+  }
+
+  function sendCanvasState() {
+    if (state.mode !== "document") return;
+    const selection = state.restoreCanvasSelection ? state.canvasSelection : null;
+    postCanvas({
+      type: "state",
+      macros: settings.macros,
+      zoom: settings.zoom,
+      selection,
+      scroll: state.previewScroll,
+    });
+    if (selection) state.restoreCanvasSelection = false;
+    sendCanvasCursors();
+  }
+
+  function sendCanvasCursors() {
+    if (state.mode !== "document") return;
+    postCanvas({ type: "cursors", users: state.users.filter((user) => user.id !== state.clientId && user.selection && user.selection.mode === "canvas") });
+  }
+
+  function sendCanvasCommand(command, value = "") {
+    postCanvas({ type: "command", command, value });
+  }
+
+  function insertCanvas(kind) {
+    if (kind === "link") {
+      const href = window.prompt("Link address", "https://example.com");
+      if (href) postCanvas({ type: "command", command: "insert", kind, value: href });
+      return;
+    }
+    if (kind === "image") {
+      const src = window.prompt("Image address", "https://example.com/image.png");
+      if (src) postCanvas({ type: "command", command: "insert", kind, value: src });
+      return;
+    }
+    if (kind === "heading") sendCanvasCommand("formatBlock", "h2");
+    else if (kind === "list") postCanvas({ type: "command", command: "insert", kind });
+    else postCanvas({ type: "command", command: "insert", kind });
+  }
+
+  function handleCanvasMessage(event) {
+    if (event.source !== preview.contentWindow) return;
+    const message = event.data || {};
+    if (message.channel !== "wmd-studio-canvas") return;
+    if (message.type === "ready") {
+      const nextText = String(message.text || "");
+      if (state.restoreCanvasSelection && state.canvasSelection && typeof state.canvasText === "string") {
+        const textOperation = operationFromDiff(state.canvasText, nextText);
+        state.canvasSelection = {
+          start: mapOffsetThroughOperation(state.canvasSelection.start, textOperation),
+          end: mapOffsetThroughOperation(state.canvasSelection.end, textOperation),
+        };
+      }
+      state.canvasText = nextText;
+      sendCanvasState();
+      return;
+    }
+    if (message.type === "input") {
+      state.canvasText = String(message.text || "");
+      if (message.selection) {
+        state.canvasSelection = {
+          start: Number(message.selection.start) || 0,
+          end: Number(message.selection.end) || 0,
+        };
+      }
+      changeSource(canvasHtmlToWmd(String(message.html || "")), { compile: false });
+      return;
+    }
+    if (message.type === "selection") {
+      state.canvasSelection = {
+        start: Number(message.start) || 0,
+        end: Number(message.end) || 0,
+      };
+      send({ type: "selection", mode: "canvas", start: state.canvasSelection.start, end: state.canvasSelection.end });
+      return;
+    }
+    if (message.type === "scroll") {
+      state.previewScroll = {
+        left: Number(message.left) || 0,
+        top: Number(message.top) || 0,
+      };
+      return;
+    }
+    if (message.type === "request-link") insertCanvas("link");
+  }
+
+  function handlePreviewMessage(event) {
+    if (event.source !== preview.contentWindow) return;
+    const message = event.data || {};
+    if (message.channel !== "wmd-studio-preview") return;
+    if (message.type === "ready") {
+      sendPreviewState();
+      return;
+    }
+    if (message.type === "scroll") {
+      state.previewScroll = {
+        left: Number(message.left) || 0,
+        top: Number(message.top) || 0,
+      };
+    }
+  }
+
+  function renderPresence() {
+    presence.replaceChildren();
+    state.users.slice(0, 8).forEach((user) => {
+      const avatar = document.querySelector("#userTemplate").content.firstElementChild.cloneNode(true);
+      const initials = user.name.split(/\s+/).map((part) => part[0]).join("").slice(0, 2).toUpperCase();
+      avatar.textContent = initials || "G";
+      avatar.style.background = user.color || "#3f7f6b";
+      avatar.title = user.id === state.clientId ? `${user.name} (you)` : `${user.name} is editing`;
+      presence.append(avatar);
+    });
+  }
+
+  function openDocument(nextId, options = {}) {
+    const id = normalizeDocumentId(nextId);
+    if (id === state.documentId && state.ready && !state.importedSource) return;
+    persistDraft();
+    state.documentId = id;
+    state.ready = false;
+    state.revision = 0;
+    state.serverSource = "";
+    state.pending = [];
+    state.inFlight = null;
+    state.dirty = false;
+    state.canvasSelection = null;
+    state.canvasText = null;
+    state.restoreCanvasSelection = false;
+    state.previewScroll = { left: 0, top: 0 };
+    state.previewFocus = null;
+    const draft = readDraft(id);
+    state.source = draft ? draft.source : "";
+    renderSource();
+    if (options.pushHistory !== false) {
+      const url = new URL(location.href);
+      url.searchParams.set("doc", id);
+      history.pushState({}, "", url);
+    }
+    saveStatus.textContent = state.source ? "Local draft loaded - connecting..." : "Loading document...";
+    scheduleCompile(0);
+    if (state.socket && state.socket.readyState === WebSocket.OPEN) {
+      send({ type: "join", documentId: id, name: settings.username, color: settings.color, clientId: state.clientId });
+    } else {
+      connect();
+    }
   }
 
   async function importDocument(file) {
     if (!file) return;
-    const id = normalizeDocumentId(file.name);
     try {
       let source;
-      if (/\.(md|markdown|wmd)$/i.test(file.name)) {
-        source = await file.text();
-      } else if (/\.docx$/i.test(file.name)) {
+      if (/\.(md|markdown|wmd)$/i.test(file.name)) source = await file.text();
+      else if (/\.docx$/i.test(file.name)) {
         const bytes = new Uint8Array(await file.arrayBuffer());
         let binary = "";
         for (let index = 0; index < bytes.length; index += 0x8000) binary += String.fromCharCode(...bytes.subarray(index, index + 0x8000));
-        const response = await fetch("/api/import", {
+        const response = await fetch(apiUrl("/api/import"), {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ filename: file.name, data: btoa(binary) }),
         });
         const result = await response.json();
-        if (!response.ok) throw new Error(result.error || "Could not import this DOCX file.");
+        if (!response.ok) throw new Error(result.error || "Could not import DOCX.");
         source = result.source;
-      } else {
-        throw new Error("Choose a .md, .wmd, or .docx file.");
-      }
-      openDocument(id);
-      const waitForDocument = () => {
-        if (!documentReady) return setTimeout(waitForDocument, 30);
-        const operation = operationFromDiff(localText, source);
-        if (!operation) return;
-        localText = source;
-        editor.value = source;
-        pending.push({ id: crypto.randomUUID(), operation });
-        saveStatus.textContent = "Importing document...";
-        updateDocumentIdentity();
-        flushOperations();
-        scheduleCompile(true);
-      };
-      waitForDocument();
-      toastMessage(`Imported ${file.name}`);
+      } else throw new Error("Choose a .md, .wmd, or .docx file.");
+      state.importedSource = source;
+      openDocument(normalizeDocumentId(file.name));
+      toastMessage(`Importing ${file.name}`);
     } catch (error) {
       toastMessage(error.message);
     } finally {
@@ -474,72 +1478,248 @@
     }
   }
 
-  editor.addEventListener("input", () => {
-    if (!documentReady) return;
-    const nextText = editor.value;
-    const operation = operationFromDiff(localText, nextText);
-    if (!operation) return;
-    localText = nextText;
-    pending.push({ id: crypto.randomUUID(), operation });
-    saveStatus.textContent = "Saving changes...";
-    updateDocumentIdentity();
-    flushOperations();
-    scheduleCompile();
-  });
+  function downloadDocument() {
+    const blob = new Blob([state.source], { type: "text/plain;charset=utf-8" });
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(blob);
+    link.download = `${state.documentId}.wmd`;
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(link.href), 0);
+  }
 
-  editor.addEventListener("keydown", (event) => {
-    if ((event.ctrlKey || event.metaKey) && !event.shiftKey && event.key.toLowerCase() === "b") {
-      event.preventDefault();
-      wrapSelection("*");
-      return;
-    }
-    if ((event.ctrlKey || event.metaKey) && !event.shiftKey && event.key.toLowerCase() === "i") {
-      event.preventDefault();
-      wrapSelection("_");
-      return;
-    }
-    if ((event.ctrlKey || event.metaKey) && event.key === "`") {
-      event.preventDefault();
-      wrapSelection("`");
-      return;
-    }
-    handleSmartDelimiter(event);
-  });
+  function openSettings() {
+    document.querySelector("#usernameInput").value = settings.username;
+    document.querySelector("#syncUrlInput").value = settings.syncUrl;
+    document.querySelector("#cursorColorInput").value = settings.color;
+    document.querySelector("#themeInput").value = settings.theme;
+    document.querySelector("#accentInput").value = settings.accent;
+    document.querySelector("#defaultModeInput").value = settings.defaultMode;
+    macroList.replaceChildren();
+    (settings.macros.length ? settings.macros : [{ trigger: "", replacement: "" }]).forEach(addMacroRow);
+    settingsDialog.showModal();
+  }
 
-  editor.addEventListener("select", () => {
-    clearTimeout(selectionTimer);
-    selectionTimer = setTimeout(() => send({ type: "selection", start: editor.selectionStart, end: editor.selectionEnd }), 90);
-  });
-  editor.addEventListener("keyup", () => editor.dispatchEvent(new Event("select")));
-  editor.addEventListener("click", () => editor.dispatchEvent(new Event("select")));
+  function addMacroRow(macro = { trigger: "", replacement: "" }) {
+    const row = document.querySelector("#macroTemplate").content.firstElementChild.cloneNode(true);
+    row.querySelector(".macro-trigger").value = macro.trigger;
+    row.querySelector(".macro-replacement").value = macro.replacement;
+    row.querySelector(".remove-macro-button").addEventListener("click", () => row.remove());
+    macroList.append(row);
+  }
 
-  document.querySelectorAll("[data-wrap]").forEach((button) => button.addEventListener("click", () => wrapSelection(button.dataset.wrap)));
-  document.querySelectorAll("[data-insert]").forEach((button) => button.addEventListener("click", () => insertTemplate(button.dataset.insert)));
-  document.querySelector("#newDocumentButton").addEventListener("click", () => {
-    const name = window.prompt("Name your new document", "team-notes");
-    if (name) openDocument(name);
-  });
-  document.querySelector("#importButton").addEventListener("click", () => importInput.click());
-  importInput.addEventListener("change", () => importDocument(importInput.files[0]));
-  document.querySelector("#downloadButton").addEventListener("click", downloadDocument);
-  document.querySelector("#shareButton").addEventListener("click", async () => {
-    try {
-      await navigator.clipboard.writeText(location.href);
-      toastMessage("Share link copied. Anyone with it can edit this document.");
-    } catch (_) {
-      window.prompt("Copy this link to collaborate", location.href);
+  function saveSettingsFromForm() {
+    const requestedSyncUrl = document.querySelector("#syncUrlInput").value.trim();
+    const syncUrl = normalizeServerUrl(requestedSyncUrl);
+    if (requestedSyncUrl && !syncUrl) {
+      toastMessage("Enter a full sync server URL. HTTPS pages require an HTTPS server.");
+      return false;
     }
-  });
-  document.querySelector("#homeButton").addEventListener("click", () => document.querySelector("#documentSidebar").scrollIntoView({ behavior: "smooth" }));
-  document.querySelector("#mobilePreviewButton").addEventListener("click", () => {
-    workspace.classList.toggle("show-preview");
-    document.querySelector("#mobilePreviewButton").textContent = workspace.classList.contains("show-preview") ? "Edit" : "Preview";
-  });
-  document.querySelector("#mobileEditButton").addEventListener("click", () => {
-    workspace.classList.remove("show-preview");
-  });
-  window.addEventListener("popstate", () => openDocument(new URLSearchParams(location.search).get("doc") || "untitled"));
+    const serverChanged = syncUrl !== settings.syncUrl;
+    settings = {
+      ...settings,
+      username: document.querySelector("#usernameInput").value.trim().slice(0, 36) || settings.username,
+      syncUrl,
+      color: document.querySelector("#cursorColorInput").value,
+      theme: document.querySelector("#themeInput").value,
+      accent: document.querySelector("#accentInput").value,
+      defaultMode: document.querySelector("#defaultModeInput").value,
+      macros: normalizeMacros([...macroList.querySelectorAll(".macro-row")].map((row) => ({
+        trigger: row.querySelector(".macro-trigger").value,
+        replacement: row.querySelector(".macro-replacement").value,
+      })), []),
+    };
+    saveSettings();
+    applyAppearance();
+    send({ type: "profile", name: settings.username, color: settings.color });
+    if (serverChanged) {
+      // Prefer the document currently on screen when moving it to another sync server.
+      state.dirty = Boolean(state.source);
+      persistDraft();
+      state.ready = false;
+      state.pending = [];
+      state.inFlight = null;
+      connect();
+      toastMessage("Switching to the selected sync server. Your local draft is safe.");
+    } else {
+      sendCanvasState();
+      toastMessage("Settings saved.");
+    }
+    return true;
+  }
 
-  refreshDocuments();
-  connect();
+  function startResize(event) {
+    if (window.matchMedia("(max-width: 960px)").matches) return;
+    state.dragging = event.currentTarget.dataset.resize;
+    event.currentTarget.classList.add("dragging");
+    event.currentTarget.setPointerCapture(event.pointerId);
+    document.body.style.userSelect = "none";
+  }
+
+  function moveResize(event) {
+    if (!state.dragging) return;
+    const rect = workspace.getBoundingClientRect();
+    const maxEditorWidth = Math.max(360, rect.width - 468);
+    settings.panes.editor = clamp(event.clientX - rect.left, 360, maxEditorWidth);
+    applyPaneLayout();
+  }
+
+  function endResize() {
+    if (!state.dragging) return;
+    state.dragging = null;
+    document.body.style.userSelect = "";
+    document.querySelectorAll(".pane-resizer").forEach((element) => element.classList.remove("dragging"));
+    saveSettings();
+  }
+
+  function adjustBaseSize(change) {
+    const current = Number.parseInt(configValue("baseSize", "16px"), 10) || 16;
+    changeConfig("baseSize", `${clamp(current + change, 10, 32)}px`);
+  }
+
+  function setZoom(value) {
+    settings.zoom = clamp(value, 60, 160);
+    saveSettings();
+    updateToolbarValues();
+    if (state.mode === "document") sendCanvasState();
+    else scheduleCompile(0);
+  }
+
+  function bindEvents() {
+    editor.addEventListener("input", onRawInput);
+    editor.addEventListener("keydown", onRawKeydown);
+    editor.addEventListener("select", scheduleRawSelection);
+    editor.addEventListener("keyup", scheduleRawSelection);
+    editor.addEventListener("click", scheduleRawSelection);
+    editor.addEventListener("scroll", () => {
+      highlightLayer.scrollTop = editor.scrollTop;
+      highlightLayer.scrollLeft = editor.scrollLeft;
+    });
+
+    document.querySelectorAll("[data-command]").forEach((button) => button.addEventListener("click", () => {
+      const command = button.dataset.command;
+      if (state.mode === "document") {
+        if (command === "highlight") sendCanvasCommand("highlight");
+        else sendCanvasCommand(command);
+      } else if (command === "bold") wrapRaw("*");
+      else if (command === "italic") wrapRaw("_");
+      else if (command === "underline") wrapRaw("++");
+      else if (command === "highlight") wrapRaw("=");
+      else if (command === "undo" || command === "redo") {
+        editor.focus();
+        document.execCommand(command);
+        setTimeout(onRawInput, 0);
+      }
+    }));
+    document.querySelectorAll("[data-insert]").forEach((button) => button.addEventListener("click", () => {
+      if (state.mode === "document") insertCanvas(button.dataset.insert);
+      else insertRaw(button.dataset.insert);
+    }));
+    document.querySelectorAll("[data-document-command]").forEach((button) => button.addEventListener("click", () => {
+      const command = button.dataset.documentCommand;
+      if (command === "size-down") adjustBaseSize(-1);
+      if (command === "size-up") adjustBaseSize(1);
+      if (command === "zoom-out") setZoom(settings.zoom - 10);
+      if (command === "zoom-in") setZoom(settings.zoom + 10);
+    }));
+    blockStyleControl.addEventListener("change", () => {
+      if (state.mode === "document") sendCanvasCommand("formatBlock", blockStyleControl.value);
+      else if (blockStyleControl.value !== "p") insertRaw("heading");
+    });
+    fontControl.addEventListener("change", () => changeConfig("font", fontControl.value));
+    zoomControl.addEventListener("click", () => setZoom(100));
+    window.addEventListener("message", (event) => {
+      handleCanvasMessage(event);
+      handlePreviewMessage(event);
+    });
+
+    documentModeButton.addEventListener("click", () => setMode("document"));
+    wmdModeButton.addEventListener("click", () => setMode("wmd", true));
+    document.querySelector("#mobilePreviewButton").addEventListener("click", () => workspace.classList.add("show-preview"));
+    mobileEditButton.addEventListener("click", () => {
+      if (state.mode === "document") setMode("wmd", true);
+      else workspace.classList.remove("show-preview");
+    });
+    document.querySelector("#uploadButton").addEventListener("click", () => importInput.click());
+    importInput.addEventListener("change", () => importDocument(importInput.files[0]));
+    document.querySelector("#downloadButton").addEventListener("click", downloadDocument);
+    document.querySelector("#shareButton").addEventListener("click", async () => {
+      try {
+        await navigator.clipboard.writeText(shareUrl());
+        toastMessage(settings.syncUrl || location.hostname !== "127.0.0.1" ? "Share link copied." : "Link copied. For remote collaborators, use a public sync server in Settings.");
+      } catch (_) {
+        window.prompt("Copy this collaboration link", shareUrl());
+      }
+    });
+    panelsButton.addEventListener("click", (event) => { event.stopPropagation(); setPanelMenu(panelMenu.hidden); });
+    document.querySelector("#closePanelsButton").addEventListener("click", () => setPanelMenu(false));
+    document.addEventListener("pointerdown", (event) => {
+      if (!panelMenu.hidden && !panelMenu.contains(event.target) && !panelsButton.contains(event.target)) setPanelMenu(false);
+    });
+    document.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") setPanelMenu(false);
+    });
+    document.querySelectorAll("[data-panel-toggle]").forEach((input) => input.addEventListener("change", () => {
+      const nextPanels = { ...settings.panels, [input.dataset.panelToggle]: input.checked };
+      const visible = {
+        editor: state.mode === "wmd" && nextPanels.editor,
+        preview: nextPanels.preview,
+      };
+      if (!visible.editor && !visible.preview) {
+        input.checked = true;
+        toastMessage("Keep one workspace panel open.");
+        return;
+      }
+      settings.panels = nextPanels;
+      applyPaneLayout();
+      saveSettings();
+    }));
+
+    document.querySelector("#settingsButton").addEventListener("click", openSettings);
+    document.querySelector("#addMacroButton").addEventListener("click", () => addMacroRow());
+    settingsForm.addEventListener("submit", (event) => {
+      if (event.submitter && event.submitter.id === "saveSettingsButton") {
+        event.preventDefault();
+        if (saveSettingsFromForm()) settingsDialog.close();
+      }
+    });
+
+    splitResizer.addEventListener("pointerdown", startResize);
+    window.addEventListener("pointermove", moveResize);
+    window.addEventListener("pointerup", endResize);
+    window.addEventListener("pointercancel", endResize);
+    window.addEventListener("resize", applyPaneLayout);
+    window.addEventListener("popstate", () => openDocument(new URLSearchParams(location.search).get("doc") || "untitled", { pushHistory: false }));
+    window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => {
+      if (settings.theme === "system") applyAppearance();
+    });
+    window.addEventListener("pagehide", shutdown);
+  }
+
+  function shutdown() {
+    state.shuttingDown = true;
+    persistDraft();
+    clearTimeout(state.reconnectTimer);
+    clearTimeout(state.compileTimer);
+    clearTimeout(state.selectionTimer);
+    state.compileController?.abort();
+    if (state.socket && state.socket.readyState < WebSocket.CLOSING) state.socket.close();
+  }
+
+  function start() {
+    applyAppearance();
+    applyPaneLayout();
+    bindEvents();
+    const draft = readDraft();
+    if (draft) {
+      state.source = draft.source;
+      state.dirty = Boolean(draft.dirty);
+      renderSource();
+      localSaveStatus.textContent = "Local draft loaded";
+      scheduleCompile(0);
+    }
+    setMode(state.mode);
+    connect();
+  }
+
+  start();
 })();

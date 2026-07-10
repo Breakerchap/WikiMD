@@ -4,6 +4,7 @@
 const crypto = require("crypto");
 const fs = require("fs");
 const http = require("http");
+const os = require("os");
 const path = require("path");
 const zlib = require("zlib");
 const { compile } = require("../wmd-compiler");
@@ -11,13 +12,20 @@ const { compile } = require("../wmd-compiler");
 const HOST = "127.0.0.1";
 const DEFAULT_PORT = 4313;
 const MAX_BODY_BYTES = 12 * 1024 * 1024;
+const MAX_SOCKET_BUFFER_BYTES = MAX_BODY_BYTES + 32;
 const HISTORY_LIMIT = 1_000;
+const MAX_HISTORY_BYTES = 2 * 1024 * 1024;
 const WEB_ROOT = __dirname;
 const PUBLIC_ROOT = path.join(WEB_ROOT, "public");
 const DATA_ROOT = path.join(WEB_ROOT, "data");
 const DOCUMENT_ID_PATTERN = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 const clients = new Set();
 const documents = new Map();
+const CORS_HEADERS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type",
+};
 
 function normalizeDocumentId(value) {
   const raw = String(value || "").toLowerCase().trim();
@@ -30,6 +38,11 @@ function normalizeDocumentId(value) {
   return DOCUMENT_ID_PATTERN.test(normalized) ? normalized : "untitled";
 }
 
+function normalizeColor(value) {
+  const color = String(value || "");
+  return /^#[0-9a-f]{6}$/i.test(color) ? color : "#3f7f6b";
+}
+
 function titleFromSource(source, fallback) {
   const match = String(source || "").match(/^@title\s+(.+)$/m);
   return (match && match[1].trim()) || fallback.replace(/[-_]+/g, " ");
@@ -40,7 +53,7 @@ function createStarterDocument(id) {
     ? "Untitled WMD document"
     : id.replace(/[-_]+/g, " ");
 
-  return `@tab Home\n@title ${title}\n\n# ${title}\n\nStart writing in **WMD**. Share this page URL to edit it together.\n\n!note Live preview\nYour collaborators see edits, cursors, and the compiled document in real time.\n!end\n`;
+  return `@tab Home\n@title ${title}\n\nStart writing in **WMD**. Share this page URL to edit it together.\n\n!note Live preview\nYour collaborators see edits, cursors, and the compiled document in real time.\n!end\n`;
 }
 
 function documentFilePath(id) {
@@ -62,6 +75,7 @@ function readDocument(id) {
     source,
     revision: 0,
     history: [],
+    historyBytes: 0,
     updatedAt: new Date().toISOString(),
     saveTimer: null,
   };
@@ -78,12 +92,36 @@ function persistDocument(document) {
   fs.renameSync(temporaryPath, targetPath);
 }
 
+function flushDocument(document) {
+  clearTimeout(document.saveTimer);
+  document.saveTimer = null;
+  persistDocument(document);
+}
+
 function scheduleSave(document) {
   clearTimeout(document.saveTimer);
   document.saveTimer = setTimeout(() => {
-    persistDocument(document);
     document.saveTimer = null;
+    try {
+      persistDocument(document);
+    } catch (error) {
+      // Keep the in-memory document available so a later edit can retry the save.
+      console.error(`Could not save ${document.id}.wmd: ${error.message}`);
+    }
   }, 350);
+}
+
+function releaseDocumentIfUnused(documentId) {
+  if (!documentId || documentClients(documentId).length) return;
+  const document = documents.get(documentId);
+  if (!document) return;
+  try {
+    flushDocument(document);
+    documents.delete(documentId);
+  } catch (error) {
+    // Do not discard a document if its final disk write did not succeed.
+    console.error(`Could not release ${document.id}.wmd: ${error.message}`);
+  }
 }
 
 function normalizeOperations(operations) {
@@ -230,6 +268,10 @@ function transformAgainstHistory(operation, baseRevision, history) {
   return transformed;
 }
 
+function operationByteLength(operation) {
+  return Buffer.byteLength(JSON.stringify(operation), "utf8");
+}
+
 function sendSocketMessage(client, message) {
   if (!client.socket.writable) return;
   const payload = Buffer.from(JSON.stringify(message));
@@ -281,7 +323,7 @@ function handleClientMessage(client, message) {
     const document = readDocument(message.documentId);
     client.documentId = document.id;
     client.name = String(message.name || "Guest").slice(0, 36) || "Guest";
-    client.color = String(message.color || "#3f7f6b").slice(0, 12);
+    client.color = normalizeColor(message.color);
     client.clientId = String(message.clientId || client.id).slice(0, 100);
     client.selection = null;
     sendSocketMessage(client, {
@@ -295,6 +337,7 @@ function handleClientMessage(client, message) {
     });
     if (previousDocumentId && previousDocumentId !== document.id) {
       broadcastPresence(previousDocumentId);
+      releaseDocumentIfUnused(previousDocumentId);
     }
     broadcastPresence(document.id);
     return;
@@ -317,11 +360,20 @@ function handleClientMessage(client, message) {
 
     try {
       const operation = transformAgainstHistory(message.operation, baseRevision, document.history);
-      document.source = applyOperation(document.source, operation);
+      const nextSource = applyOperation(document.source, operation);
+      if (Buffer.byteLength(nextSource, "utf8") > MAX_BODY_BYTES) {
+        throw new Error("Documents cannot exceed 12 MB.");
+      }
+      document.source = nextSource;
       document.revision += 1;
       document.updatedAt = new Date().toISOString();
-      document.history.push({ revision: document.revision, operation });
-      if (document.history.length > HISTORY_LIMIT) document.history.shift();
+      const historyEntry = { revision: document.revision, operation, bytes: operationByteLength(operation) };
+      document.history.push(historyEntry);
+      document.historyBytes += historyEntry.bytes;
+      while (document.history.length > HISTORY_LIMIT || document.historyBytes > MAX_HISTORY_BYTES) {
+        const expired = document.history.shift();
+        document.historyBytes -= expired.bytes;
+      }
       scheduleSave(document);
       broadcast(document.id, {
         type: "operation",
@@ -340,12 +392,27 @@ function handleClientMessage(client, message) {
     const start = Number(message.start);
     const end = Number(message.end);
     if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end < 0) return;
-    client.selection = { start, end };
+    client.selection = {
+      start,
+      end,
+      mode: message.mode === "canvas" ? "canvas" : "wmd",
+    };
+    broadcastPresence(client.documentId);
+    return;
+  }
+
+  if (message.type === "profile") {
+    client.name = String(message.name || client.name).slice(0, 36) || "Guest";
+    client.color = normalizeColor(message.color || client.color);
     broadcastPresence(client.documentId);
   }
 }
 
 function parseSocketFrames(client, chunk) {
+  if (client.buffer.length + chunk.length > MAX_SOCKET_BUFFER_BYTES) {
+    client.socket.destroy();
+    return;
+  }
   client.buffer = Buffer.concat([client.buffer, chunk]);
 
   while (client.buffer.length >= 2) {
@@ -353,6 +420,10 @@ function parseSocketFrames(client, chunk) {
     const second = client.buffer[1];
     const opcode = first & 0x0f;
     const masked = Boolean(second & 0x80);
+    if (!masked) {
+      client.socket.destroy();
+      return;
+    }
     let offset = 2;
     let payloadLength = second & 0x7f;
 
@@ -369,6 +440,11 @@ function parseSocketFrames(client, chunk) {
       }
       payloadLength = Number(longLength);
       offset += 8;
+    }
+
+    if (payloadLength > MAX_BODY_BYTES) {
+      client.socket.destroy();
+      return;
     }
 
     const frameLength = offset + (masked ? 4 : 0) + payloadLength;
@@ -439,7 +515,10 @@ function acceptWebSocket(request, socket) {
   socket.on("error", () => socket.destroy());
   socket.on("close", () => {
     clients.delete(client);
-    if (client.documentId) broadcastPresence(client.documentId);
+    if (client.documentId) {
+      broadcastPresence(client.documentId);
+      releaseDocumentIfUnused(client.documentId);
+    }
   });
 }
 
@@ -463,6 +542,7 @@ function readRequestBody(request) {
 
 function sendJson(response, statusCode, value) {
   response.writeHead(statusCode, {
+    ...CORS_HEADERS,
     "Content-Type": "application/json; charset=utf-8",
     "Cache-Control": "no-store",
   });
@@ -489,6 +569,7 @@ function serveStatic(request, response, pathname) {
   }
 
   response.writeHead(200, {
+    ...CORS_HEADERS,
     "Content-Type": contentTypeFor(filePath),
     "Cache-Control": "no-store",
   });
@@ -534,7 +615,7 @@ function readZipEntry(buffer, filename) {
       const contentStart = localOffset + 30 + localNameLength + localExtraLength;
       const content = buffer.subarray(contentStart, contentStart + compressedSize);
       if (compression === 0) return content;
-      if (compression === 8) return zlib.inflateRawSync(content);
+      if (compression === 8) return zlib.inflateRawSync(content, { maxOutputLength: MAX_BODY_BYTES });
       throw new Error("This DOCX uses an unsupported compression method.");
     }
 
@@ -603,6 +684,11 @@ async function handleRequest(request, response) {
   const url = new URL(request.url, `http://${request.headers.host || HOST}`);
 
   try {
+    if (request.method === "OPTIONS") {
+      response.writeHead(204, CORS_HEADERS);
+      response.end();
+      return;
+    }
     if (request.method === "GET" && url.pathname === "/api/documents") {
       sendJson(response, 200, { documents: listDocuments() });
       return;
@@ -634,7 +720,17 @@ async function handleRequest(request, response) {
   }
 }
 
-function startServer(port = DEFAULT_PORT, host = HOST) {
+function localNetworkUrls(port) {
+  const urls = new Set();
+  for (const addresses of Object.values(os.networkInterfaces())) {
+    for (const address of addresses || []) {
+      if (address.family === "IPv4" && !address.internal) urls.add(`http://${address.address}:${port}`);
+    }
+  }
+  return [...urls];
+}
+
+function startServer(port = DEFAULT_PORT, host = HOST, publicUrl = "") {
   const server = http.createServer(handleRequest);
   server.on("upgrade", (request, socket) => {
     const url = new URL(request.url, `http://${request.headers.host || HOST}`);
@@ -645,8 +741,12 @@ function startServer(port = DEFAULT_PORT, host = HOST) {
     acceptWebSocket(request, socket);
   });
   server.listen(port, host, () => {
-    const displayHost = host === "0.0.0.0" ? "localhost" : host;
-    console.log(`WMD Web Editor running at http://${displayHost}:${port}`);
+    console.log(`WMD Web Editor running at http://${host === "0.0.0.0" ? "localhost" : host}:${port}`);
+    if (host === "0.0.0.0") {
+      const urls = localNetworkUrls(port);
+      if (urls.length) console.log(`LAN address: ${urls.join(" or ")}`);
+    }
+    if (publicUrl) console.log(`Public editor URL: ${publicUrl}`);
     console.log("Share a document URL such as /?doc=team-notes to collaborate.");
   });
   return server;
@@ -660,19 +760,36 @@ function parseOptions(argv) {
     : DEFAULT_PORT;
   const hostIndex = argv.indexOf("--host");
   const host = hostIndex === -1 ? HOST : String(argv[hostIndex + 1] || HOST);
-  return { host, port };
+  const publicUrlIndex = argv.indexOf("--public-url");
+  let publicUrl = "";
+  if (publicUrlIndex !== -1) {
+    try {
+      const url = new URL(String(argv[publicUrlIndex + 1] || ""));
+      if (/^https?:$/.test(url.protocol)) publicUrl = url.origin;
+    } catch (_) {
+      // The local server remains usable when an optional display URL is invalid.
+    }
+  }
+  return { host, port, publicUrl };
 }
 
 if (require.main === module) {
   const options = parseOptions(process.argv.slice(2));
-  const server = startServer(options.port, options.host);
-  process.on("SIGINT", () => {
+  const server = startServer(options.port, options.host, options.publicUrl);
+  const shutdown = () => {
     for (const document of documents.values()) {
-      clearTimeout(document.saveTimer);
-      persistDocument(document);
+      try {
+        flushDocument(document);
+      } catch (error) {
+        console.error(`Could not save ${document.id}.wmd during shutdown: ${error.message}`);
+      }
     }
+    for (const client of clients) client.socket.destroy();
     server.close(() => process.exit(0));
-  });
+    setTimeout(() => process.exit(0), 2_000).unref();
+  };
+  process.once("SIGINT", shutdown);
+  process.once("SIGTERM", shutdown);
 }
 
 module.exports = {
@@ -680,5 +797,6 @@ module.exports = {
   createStarterDocument,
   docxToWmd,
   normalizeDocumentId,
+  parseOptions,
   transformOperations,
 };

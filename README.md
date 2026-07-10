@@ -1,6 +1,6 @@
 # Semi-MD / WMD
 
-This project compiles `.wmd` files into a single interactive HTML document with tabs, includes, callouts, collapsible sections, heading search, and dark mode.
+This project compiles `.wmd` files into a single interactive HTML document with tabs, includes, callouts, collapsible sections, and heading search. Theme choice belongs to the editor or host application, not to individual documents.
 
 Generated `.html` preview files are treated as build artifacts and are ignored by git.
 
@@ -37,11 +37,35 @@ git switch web-editor
 node web/server.js
 ```
 
-Then open `http://127.0.0.1:4313`. The editor has a persistent formatting bar, WMD source editing, `Ctrl+B` / `Ctrl+I` shortcuts, live compiled previews, MD and DOCX import, and `.wmd` downloads. Share the page URL, for example `http://127.0.0.1:4313/?doc=team-notes`, with another browser on the same server to collaborate in real time.
+Then open `http://127.0.0.1:4313`. It opens in an editable version of the actual compiled document, with a toggle to syntax-highlighted raw WMD. The Docs-style toolbar provides document style, font, size, zoom, formatting, links, images, headings, lists, callouts, tabs, and undo/redo. The workspace also has resizable/hideable panes, MD/WMD/DOCX import, and `.wmd` downloads.
 
-Saved browser documents live in `web/data/`, which is intentionally ignored by Git.
+Settings are stored per browser and include your username, cursor color, global theme, main color palette, default editor mode, and text macros such as `--` becoming an en dash. Collaborators in the same mode see each other's named cursors as they type, and everyone sees live source and document changes. Use `++underlined text++` for persistent WMD underline.
+
+Saved browser documents live in `web/data/`, which is intentionally ignored by Git. The browser also keeps a local recovery copy for every document and sync server, so an edit made while offline is restored after a refresh or reconnect.
 
 For collaborators on your local network, start the server with `node web/server.js --host 0.0.0.0` (or `npm run web:lan`) and share your computer's LAN address, such as `http://192.168.1.20:4313/?doc=team-notes`. This editor intentionally has no sign-in system yet, so only use LAN mode on a network you trust.
+
+For people on different networks, run the same server on an HTTPS-accessible host or behind a secure tunnel, then open and share that public editor URL. The server accepts cross-origin sync requests, so a local editor can also connect through **Settings -> Sync server URL**. When launching behind a public address, this prints the intended share base in the terminal:
+
+```bash
+node web/server.js --host 0.0.0.0 --public-url https://docs.example.com
+```
+
+The public host must provide its own access control (for example, a VPN, authenticated reverse proxy, or a private tunnel) before it is shared outside a trusted group. WMD Studio does not yet include accounts or document permissions.
+
+### Quick internet sharing
+
+`ngrok` is available on this Windows machine, so you can share a temporary HTTPS link without changing router settings:
+
+```powershell
+# Terminal 1: keep the editor running
+npm run web
+
+# Terminal 2: create the public URL, then share the https:// address it prints
+npm run web:share
+```
+
+The link works only while both terminals remain open. If ngrok asks for an auth token, follow its one-time setup prompt, then run `npm run web:share` again. For a longer-lived shared editor, use a named tunnel or an HTTPS host with access control.
 
 You can also point the compiler at another file:
 

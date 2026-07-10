@@ -2,6 +2,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 
 const { compile, parseArgs } = require("../wmd-compiler.js");
+const { parseOptions } = require("../web/server.js");
 
 test("parseArgs supports positional files and serve mode", () => {
   const options = parseArgs(["--serve", "notes.wmd", "notes.html", "--port", "4500"]);
@@ -62,5 +63,37 @@ test("duplicate tab names are warned about and get unique section ids", () => {
 
   assert.match(result.html, /<section id="combat"/);
   assert.match(result.html, /<section id="combat-2"/);
+  assert.match(result.html, /data-tab-name="Combat"/);
   assert.ok(result.warnings.some((warning) => warning.includes('Duplicate tab name "Combat"')));
+});
+
+test("compiled documents leave theme selection to the host application", () => {
+  const result = compile("@tab Home\n# Theme test");
+
+  assert.doesNotMatch(result.html, /id="darkToggle"/);
+  assert.doesNotMatch(result.html, /localStorage\.getItem\("darkMode"\)/);
+});
+
+test("double plus markers compile to persistent underline", () => {
+  const result = compile("@tab Home\n++Important++");
+
+  assert.match(result.html, /<u>Important<\/u>/);
+});
+
+test("single WMD newlines render as document line breaks", () => {
+  const result = compile("@tab Home\nFirst line\nSecond line");
+
+  assert.match(result.html, /First line<br>\s*Second line/);
+});
+
+test("web server options support LAN and a public editor URL", () => {
+  const options = parseOptions([
+    "--host", "0.0.0.0",
+    "--port", "4510",
+    "--public-url", "https://docs.example.com/workspace",
+  ]);
+
+  assert.equal(options.host, "0.0.0.0");
+  assert.equal(options.port, 4510);
+  assert.equal(options.publicUrl, "https://docs.example.com");
 });

@@ -202,6 +202,25 @@ function customItalicPlugin(md) {
   });
 }
 
+function underlinePlugin(md) {
+  md.inline.ruler.before("link", "underline", (state, silent) => {
+    const start = state.pos;
+    if (state.src.slice(start, start + 2) !== "++") return false;
+
+    const end = state.src.indexOf("++", start + 2);
+    if (end === -1 || end === start + 2) return false;
+
+    if (!silent) {
+      state.push("u_open", "u", 1);
+      state.md.inline.parse(state.src.slice(start + 2, end), state.md, state.env, state.tokens);
+      state.push("u_close", "u", -1);
+    }
+
+    state.pos = end + 2;
+    return true;
+  });
+}
+
 function highlightPlugin(md) {
   md.inline.ruler.before("link", "highlight", (state, silent) => {
     const start = state.pos;
@@ -727,6 +746,7 @@ function uniqueWarnings(warnings) {
 function makeMarkdownIt() {
   const md = new MarkdownIt({
     html: false,
+    breaks: true,
     linkify: true,
     typographer: true,
   });
@@ -735,6 +755,7 @@ function makeMarkdownIt() {
   md.use(wikiLinkPlugin);
   md.use(customBoldPlugin);
   md.use(customItalicPlugin);
+  md.use(underlinePlugin);
   md.use(highlightPlugin);
   md.use(calloutPlugin);
   md.use(collapsePlugin);
@@ -814,7 +835,7 @@ function buildHtml(config, tabs, warnings) {
         : "";
 
       return `
-<section id="${escapeHtml(tab.domId)}" class="tab-section ${active}" data-hidden="${tab.hidden ? "true" : "false"}">
+<section id="${escapeHtml(tab.domId)}" class="tab-section ${active}" data-hidden="${tab.hidden ? "true" : "false"}" data-tab-name="${escapeHtml(tab.name)}" data-tab-hidden="${tab.hidden ? "true" : "false"}">
 ${titleHtml}
 ${rendered}
 </section>`;
@@ -920,19 +941,6 @@ ${finalWarnings.map((warning) => `<p>${escapeHtml(warning)}</p>`).join("\n")}
   .sidebar-title {
     font-size: 1.1rem;
     margin: 0 0 12px;
-  }
-
-  .dark-toggle {
-    width: 100%;
-    margin-top: 20px;
-    padding: 9px;
-    cursor: pointer;
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    background: var(--bg);
-    color: var(--text);
-    font-size: 0.95rem;
-    font-family: inherit;
   }
 
   .tab-button {
@@ -1280,8 +1288,6 @@ ${finalWarnings.map((warning) => `<p>${escapeHtml(warning)}</p>`).join("\n")}
       ${searchItems}
     </div>
 
-    <button class="dark-toggle" id="darkToggle" type="button">Dark mode</button>
-
     ${warningHtml}
   </aside>
 
@@ -1452,11 +1458,6 @@ ${finalWarnings.map((warning) => `<p>${escapeHtml(warning)}</p>`).join("\n")}
     updateHeadingList();
   }
 
-  function toggleDarkMode() {
-    document.body.classList.toggle("dark");
-    localStorage.setItem("darkMode", document.body.classList.contains("dark"));
-  }
-
   function syncFromHash() {
     var hash = location.hash.slice(1);
 
@@ -1491,10 +1492,6 @@ ${finalWarnings.map((warning) => `<p>${escapeHtml(warning)}</p>`).join("\n")}
     openTab(${JSON.stringify(firstActiveTabId)}, false);
   }
 
-  if (localStorage.getItem("darkMode") === "true") {
-    document.body.classList.add("dark");
-  }
-
   setupCollapsibleHeadings();
 
   document.querySelectorAll(".tab-button").forEach(function(button) {
@@ -1512,11 +1509,6 @@ ${finalWarnings.map((warning) => `<p>${escapeHtml(warning)}</p>`).join("\n")}
   var headingSearch = document.getElementById("headingSearch");
   if (headingSearch) {
     headingSearch.addEventListener("input", filterHeadings);
-  }
-
-  var darkToggle = document.getElementById("darkToggle");
-  if (darkToggle) {
-    darkToggle.addEventListener("click", toggleDarkMode);
   }
 
   window.addEventListener("popstate", syncFromHash);

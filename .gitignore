@@ -3,6 +3,9 @@ node_modules/
 # Generated previews and compiled output
 *.html
 
+# The browser editor's source page is not generated output.
+!web/public/index.html
+
 # Local documents created by the web editor
 web/data/
 
