@@ -87,6 +87,13 @@ test("callout types retain their compiled style classes", () => {
   assert.match(result.html, /<div class="callout-title">Check this<\/div>/);
 });
 
+test("task list syntax compiles to checkboxes", () => {
+  const result = compile("@tab Home\n- [ ] Pending\n- [x] Complete");
+
+  assert.match(result.html, /class="task-checkbox" type="checkbox" disabled/);
+  assert.match(result.html, /class="task-checkbox" type="checkbox" checked disabled/);
+});
+
 test("single WMD newlines render as document line breaks", () => {
   const result = compile("@tab Home\nFirst line\nSecond line");
 

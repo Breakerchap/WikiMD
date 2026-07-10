@@ -163,6 +163,25 @@ function customBoldPlugin(md) {
   });
 }
 
+function taskCheckboxPlugin(md) {
+  md.inline.ruler.before("link", "wmd_task_checkbox", (state, silent) => {
+    const match = state.src.slice(state.pos).match(/^\[([ xX])\]\s+/);
+    if (!match) return false;
+
+    if (!silent) {
+      const token = state.push("wmd_task_checkbox", "input", 0);
+      token.meta = { checked: match[1].toLowerCase() === "x" };
+    }
+
+    state.pos += match[0].length;
+    return true;
+  });
+
+  md.renderer.rules.wmd_task_checkbox = (tokens, idx) => {
+    return `<input class="task-checkbox" type="checkbox"${tokens[idx].meta.checked ? " checked" : ""} disabled>`;
+  };
+}
+
 function customItalicPlugin(md) {
   md.inline.ruler.before("link", "custom_italic", (state, silent) => {
     const start = state.pos;
@@ -752,7 +771,9 @@ function makeMarkdownIt() {
   });
 
   md.disable("emphasis");
+  md.enable("strikethrough");
   md.use(wikiLinkPlugin);
+  md.use(taskCheckboxPlugin);
   md.use(customBoldPlugin);
   md.use(customItalicPlugin);
   md.use(underlinePlugin);

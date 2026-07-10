@@ -13,6 +13,7 @@
   const workspace = document.querySelector("#workspace");
   const editorPane = document.querySelector("#editorPane");
   const previewPane = document.querySelector("#previewZone");
+  const documentTabs = document.querySelector("#documentTabs");
   const splitResizer = document.querySelector('[data-resize="split"]');
   const documentName = document.querySelector("#documentName");
   const connectionStatus = document.querySelector("#connectionStatus");
@@ -41,6 +42,8 @@
   const findInput = document.querySelector("#findInput");
   const replaceInput = document.querySelector("#replaceInput");
   const findStatus = document.querySelector("#findStatus");
+  const shareDialog = document.querySelector("#shareDialog");
+  const shareLinkInput = document.querySelector("#shareLinkInput");
   const macroList = document.querySelector("#macroList");
   const importInput = document.querySelector("#importInput");
   const documentModeButton = document.querySelector("#documentModeButton");
@@ -83,6 +86,8 @@
     importedSource: null,
     pendingInsert: null,
     findMatch: null,
+    activeTab: "",
+    history: { undo: [], redo: [], lastAt: 0 },
   };
 
   function createId() {
@@ -434,6 +439,15 @@
     toastMessage("Document renamed.");
   }
 
+  function openShareDialog() {
+    shareLinkInput.value = shareUrl();
+    shareDialog.showModal();
+    requestAnimationFrame(() => {
+      shareLinkInput.focus();
+      shareLinkInput.select();
+    });
+  }
+
   function openFindDialog() {
     const selected = state.mode === "wmd" ? editor.value.slice(editor.selectionStart, editor.selectionEnd) : "";
     if (selected) findInput.value = selected;
@@ -512,6 +526,57 @@
     wordCount.textContent = `${words.toLocaleString()} word${words === 1 ? "" : "s"}`;
   }
 
+  function parsedTabs() {
+    return [...state.source.matchAll(/^@tab\s+(.+?)(?:\s+\{hidden\})?\s*$/gm)]
+      .map((match) => match[1].trim())
+      .filter(Boolean);
+  }
+
+  function documentLinkTargets() {
+    const targets = [];
+    let tab = "";
+    for (const line of state.source.split("\n")) {
+      const tabMatch = line.match(/^@tab\s+(.+?)(?:\s+\{hidden\})?\s*$/);
+      if (tabMatch) {
+        tab = tabMatch[1].trim();
+        targets.push({ value: tab, label: tab });
+        continue;
+      }
+      const headingMatch = line.match(/^#{1,6}\s+(.+)$/);
+      if (tab && headingMatch) {
+        const heading = previewText(headingMatch[1]);
+        if (heading) targets.push({ value: `${tab}#${heading}`, label: `${tab} / ${heading}` });
+      }
+    }
+    return targets;
+  }
+
+  function selectDocumentTab(name) {
+    state.activeTab = name;
+    renderDocumentTabs();
+    postPreview({ type: "show-tab", tab: name });
+    postCanvas({ type: "command", command: "show-tab", value: name });
+  }
+
+  function renderDocumentTabs() {
+    const tabs = parsedTabs();
+    if (tabs.length <= 1) {
+      documentTabs.hidden = true;
+      documentTabs.replaceChildren();
+      return;
+    }
+    if (!tabs.includes(state.activeTab)) state.activeTab = tabs[0];
+    documentTabs.hidden = false;
+    documentTabs.replaceChildren(...tabs.map((name) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.textContent = name;
+      button.setAttribute("aria-current", String(name === state.activeTab));
+      button.addEventListener("click", () => selectDocumentTab(name));
+      return button;
+    }));
+  }
+
   function renderSource(options = {}) {
     // Do not reset the raw textarea while its own input event is being handled.
     if (state.mode === "wmd") {
@@ -520,6 +585,7 @@
     }
     updateIdentity();
     updateWordCount();
+    renderDocumentTabs();
     updateToolbarValues();
   }
 
@@ -658,6 +724,7 @@
     state.inFlight = null;
     state.ready = true;
     state.importedSource = null;
+    resetHistory();
 
     if (restore && restore !== document.source) {
       state.source = restore;
@@ -699,6 +766,7 @@
         return { ...entry, operation: localOperation };
       });
       state.source = applyOperation(state.source, incoming);
+      resetHistory();
       if (state.canvasSelection && state.mode === "document") state.restoreCanvasSelection = true;
       state.dirty = Boolean(state.pending.length || state.inFlight);
       renderSource();
@@ -713,7 +781,9 @@
 
   function changeSource(nextSource, options = {}) {
     if (nextSource === state.source) return;
-    const operation = operationFromDiff(state.source, nextSource);
+    const previousSource = state.source;
+    const operation = operationFromDiff(previousSource, nextSource);
+    if (options.history !== false) recordHistory(previousSource, options);
     state.source = nextSource;
     state.dirty = true;
     if (operation && state.ready) state.pending.push({ id: createId(), operation });
@@ -722,6 +792,36 @@
     saveStatus.textContent = state.ready ? "Saving changes..." : "Saved locally - waiting for server";
     flushOperations();
     if (options.compile !== false) scheduleCompile();
+  }
+
+  function resetHistory() {
+    state.history.undo = [];
+    state.history.redo = [];
+    state.history.lastAt = 0;
+  }
+
+  function recordHistory(source, options = {}) {
+    const now = Date.now();
+    const coalesce = options.coalesce !== false && now - state.history.lastAt < 750;
+    if (!coalesce) {
+      state.history.undo.push(source);
+      if (state.history.undo.length > 120) state.history.undo.shift();
+    }
+    state.history.redo = [];
+    state.history.lastAt = now;
+  }
+
+  function applyHistory(direction) {
+    const from = direction === "redo" ? state.history.redo : state.history.undo;
+    const to = direction === "redo" ? state.history.undo : state.history.redo;
+    if (!from.length) {
+      toastMessage(`Nothing to ${direction}.`);
+      return;
+    }
+    const nextSource = from.pop();
+    to.push(state.source);
+    state.history.lastAt = 0;
+    changeSource(nextSource, { compile: true, keepEditor: state.mode === "wmd", history: false });
   }
 
   function flushOperations() {
@@ -810,6 +910,13 @@
     });
   }
 
+  function activateNamedTab(name) {
+    var section = Array.prototype.slice.call(document.querySelectorAll('main > .tab-section')).find(function(candidate) {
+      return label(candidate.dataset.tabName) === label(name);
+    });
+    activateSection(section);
+  }
+
   function reveal(focus) {
     if (!focus) return;
     var sectionForTab = focus.tab && Array.prototype.slice.call(document.querySelectorAll('main > .tab-section')).find(function(section) {
@@ -866,11 +973,26 @@
   }, true);
 
   window.addEventListener('scroll', function() {
-    post('scroll', { left: window.scrollX, top: window.scrollY });
+    post('scroll', {
+      left: window.scrollX,
+      top: window.scrollY,
+      height: Math.max(document.documentElement.scrollHeight, document.body.scrollHeight),
+      viewport: window.innerHeight
+    });
   }, { passive: true });
   window.addEventListener('message', function(event) {
     var data = event.data || {};
-    if (data.channel !== 'wmd-studio-preview' || data.type !== 'state') return;
+    if (data.channel !== 'wmd-studio-preview') return;
+    if (data.type === 'show-tab') {
+      activateNamedTab(data.tab);
+      return;
+    }
+    if (data.type === 'scroll-ratio') {
+      var maximum = Math.max(0, Math.max(document.documentElement.scrollHeight, document.body.scrollHeight) - window.innerHeight);
+      window.scrollTo(0, maximum * Math.max(0, Math.min(1, Number(data.ratio) || 0)));
+      return;
+    }
+    if (data.type !== 'state') return;
     var scroll = data.scroll || {};
     window.scrollTo(Number(scroll.left) || 0, Number(scroll.top) || 0);
     reveal(data.focus);
@@ -939,6 +1061,15 @@
     });
   }
   refreshTabBar();
+
+  function activateNamedTab(name) {
+    var section = Array.prototype.slice.call(main.querySelectorAll(':scope > section.tab-section')).find(function(candidate) {
+      return String(candidate.dataset.tabName || '').trim() === String(name || '').trim();
+    });
+    if (!section) return;
+    main.querySelectorAll(':scope > section.tab-section').forEach(function(candidate) { candidate.classList.toggle('active', candidate === section); });
+    refreshTabBar();
+  }
 
   function updateEditableHeadingVisibility(section) {
     if (!section) return;
@@ -1117,11 +1248,30 @@
     return '<div class="callout callout-' + type + '"><div class="callout-title">' + title + '</div><div class="callout-body"><p>Write the ' + type + ' here.</p></div></div><p><br></p>';
   }
 
+  function internalLinkHref(target) {
+    var parts = String(target || '').split('#');
+    var tabName = parts.shift() || '';
+    var headingName = parts.join('#');
+    var section = Array.prototype.slice.call(main.querySelectorAll(':scope > section.tab-section')).find(function(candidate) {
+      return String(candidate.dataset.tabName || '').trim() === tabName.trim();
+    });
+    if (!section) return '#';
+    if (!headingName) return '#' + section.id;
+    var heading = Array.prototype.slice.call(section.querySelectorAll('h1, h2, h3, h4, h5, h6')).find(function(candidate) {
+      var text = candidate.textContent.trim();
+      if (text.charAt(0) === 'v' || text.charAt(0) === '>') text = text.slice(1).trim();
+      return text === headingName.trim();
+    });
+    return heading ? '#' + heading.id : '#' + section.id;
+  }
+
   function command(data) {
     main.focus();
     if (data.command === 'insert') {
       if (data.kind === 'link') {
-        var href = data.value && data.value.href ? data.value.href : data.value;
+        var href = data.value && data.value.internalTarget
+          ? internalLinkHref(data.value.internalTarget)
+          : data.value && data.value.href ? data.value.href : data.value;
         document.execCommand('createLink', false, href || 'https://example.com');
       }
       if (data.kind === 'image') {
@@ -1136,6 +1286,7 @@
       }
       if (data.kind === 'list') document.execCommand('insertUnorderedList');
       if (data.kind === 'ordered-list') document.execCommand('insertOrderedList');
+      if (data.kind === 'checkbox') document.execCommand('insertHTML', false, '<ul><li><input class="task-checkbox" type="checkbox" contenteditable="false"> Task</li></ul><p><br></p>');
       if (data.kind === 'table') document.execCommand('insertHTML', false, tableHtml(data.value));
       if (data.kind === 'callout') document.execCommand('insertHTML', false, calloutHtml(data.value));
       if (data.kind === 'tab') {
@@ -1156,9 +1307,21 @@
       document.execCommand(data.command, false, data.value || null);
     }
     notifyInput();
+    setupTaskCheckboxes();
+  }
+
+  function setupTaskCheckboxes() {
+    main.querySelectorAll('input.task-checkbox').forEach(function(input) {
+      if (input.dataset.wmdStudioReady) return;
+      input.disabled = false;
+      input.contentEditable = 'false';
+      input.dataset.wmdStudioReady = 'true';
+      input.addEventListener('change', notifyInput);
+    });
   }
 
   main.addEventListener('input', function() { expandMacro(); notifyInput(); });
+  setupTaskCheckboxes();
   main.addEventListener('click', function(event) { event.stopPropagation(); post('selection', selectionInfo()); }, true);
   main.addEventListener('dblclick', function(event) {
     var target = event.target && (event.target.nodeType === Node.ELEMENT_NODE ? event.target : event.target.parentElement);
@@ -1194,6 +1357,8 @@
     }
     if (!(event.ctrlKey || event.metaKey)) return;
     var key = event.key.toLowerCase();
+    if (key === 'z') { event.preventDefault(); post('request-history', { direction: event.shiftKey ? 'redo' : 'undo' }); return; }
+    if (key === 'y') { event.preventDefault(); post('request-history', { direction: 'redo' }); return; }
     if (key === 'h') { event.preventDefault(); post('request-find', {}); return; }
     if (key === 'b') { event.preventDefault(); command({ command: 'bold' }); }
     if (key === 'i') { event.preventDefault(); command({ command: 'italic' }); }
@@ -1219,6 +1384,10 @@
           window.scrollTo(Number(data.scroll.left) || 0, Number(data.scroll.top) || 0);
         });
       }
+    }
+    if (data.type === 'command' && data.command === 'show-tab') {
+      activateNamedTab(data.value);
+      return;
     }
     if (data.type === 'command') command(data);
     if (data.type === 'cursors') {
@@ -1306,9 +1475,11 @@
       if (current.tagName === "STRONG" || current.tagName === "B") return `*${children}*`;
       if (current.tagName === "EM" || current.tagName === "I") return `_${children}_`;
       if (current.tagName === "U") return `++${children}++`;
+      if (current.tagName === "S" || current.tagName === "STRIKE" || current.tagName === "DEL") return `~~${children}~~`;
       if (current.tagName === "MARK") return `=${children}=`;
       if (current.tagName === "SPAN" && /background-color/i.test(current.getAttribute("style") || "")) return `=${children}=`;
       if (current.tagName === "CODE") return `\`${children}\``;
+      if (current.tagName === "INPUT" && current.type === "checkbox") return current.checked ? "[x] " : "[ ] ";
       if (current.tagName === "A") return `[${children}](${current.getAttribute("href") || ""})`;
       if (current.tagName === "IMG") return `![${current.getAttribute("alt") || "image"}](${current.getAttribute("src") || ""})`;
       if (current.tagName === "BR") return "\n";
@@ -1319,7 +1490,7 @@
 
   function renderWarnings(warnings) {
     warningList.hidden = warnings.length === 0;
-    warningList.innerHTML = warnings.length ? `<ul>${warnings.map((warning) => `<li>${escapeHtml(warning)}</li>`).join("")}</ul>` : "";
+    warningList.innerHTML = warnings.length ? `<details open><summary>Compiler warnings (${warnings.length})</summary><ul>${warnings.map((warning) => `<li>${escapeHtml(warning)}</li>`).join("")}</ul></details>` : "";
   }
 
   function setMode(mode, focus = false) {
@@ -1373,7 +1544,7 @@
   }
 
   function inlineHighlight(source) {
-    const tokens = /(\[\[[^\]]+\]\]|\[[^\]]+\]\([^\)]+\)|\{\{[A-Za-z][\w-]*\}\}|`[^`\n]*`|===[^=\n]+===|==[^=\n]+==|=[^=\n]+=|\+\+[^+\n]+\+\+|\*\*[^*\n]+\*\*|\*[^*\n]+\*|_[^_\n]+_)/g;
+    const tokens = /(\[\[[^\]]+\]\]|\[[^\]]+\]\([^\)]+\)|\{\{[A-Za-z][\w-]*\}\}|`[^`\n]*`|===[^=\n]+===|==[^=\n]+==|=[^=\n]+=|~~[^~\n]+~~|\+\+[^+\n]+\+\+|\*\*[^*\n]+\*\*|\*[^*\n]+\*|_[^_\n]+_)/g;
     let output = "";
     let position = 0;
     for (const match of source.matchAll(tokens)) {
@@ -1383,6 +1554,7 @@
       if (token.startsWith("{{")) className = "syntax-variable";
       else if (token.startsWith("`")) className = "syntax-inline-code";
       else if (token.startsWith("=")) className = "syntax-highlight";
+      else if (token.startsWith("~~")) className = "syntax-strike";
       else if (token.startsWith("++")) className = "syntax-underline";
       else if (token.startsWith("*")) className = "syntax-bold";
       else if (token.startsWith("_")) className = "syntax-italic";
@@ -1496,7 +1668,26 @@
     confirmInsertButton.textContent = kind === "table" ? "Create table" : "Insert";
 
     if (kind === "link") {
-      insertFields.append(addInsertField("Link address", "href", { type: "url", placeholder: "https://example.com", value: "https://", required: true }).label);
+      const targets = documentLinkTargets();
+      const linkType = addInsertField("Link destination", "linkType", {
+        tagName: "select",
+        options: targets.length
+          ? [{ value: "internal", label: "Document tab or heading" }, { value: "external", label: "Web address" }]
+          : [{ value: "external", label: "Web address" }],
+      });
+      const target = addInsertField("Document destination", "target", {
+        tagName: "select",
+        options: targets.map((item) => ({ value: item.value, label: item.label })),
+      });
+      const external = addInsertField("Web address", "href", { type: "url", placeholder: "https://example.com", value: "https://" });
+      insertFields.append(linkType.label, target.label, external.label);
+      const updateLinkFields = () => {
+        const internal = linkType.control.value === "internal";
+        target.label.hidden = !internal;
+        external.label.hidden = internal;
+      };
+      linkType.control.addEventListener("change", updateLinkFields);
+      updateLinkFields();
       insertFields.append(addInsertField("Link text", "label", { placeholder: "Link text" }).label);
     } else if (kind === "image") {
       insertFields.append(addInsertField("Image address", "src", { type: "url", placeholder: "https://example.com/image.png", value: "https://", required: true }).label);
@@ -1520,7 +1711,10 @@
   function insertPayload(kind) {
     const form = new FormData(insertForm);
     if (kind === "link") {
+      const internalTarget = String(form.get("target") || "").trim();
+      const linkType = String(form.get("linkType") || "external");
       const href = String(form.get("href") || "").trim();
+      if (linkType === "internal" && internalTarget) return { internalTarget, label: String(form.get("label") || "").trim() };
       if (!href) return null;
       return { href, label: String(form.get("label") || "").trim() };
     }
@@ -1591,8 +1785,11 @@
       const link = value || {};
       const start = editor.selectionStart;
       const selected = editor.value.slice(start, editor.selectionEnd);
-      const label = link.label || selected || "link text";
-      const text = `[${label}](${link.href || "https://example.com"})`;
+      const customLabel = link.label || selected;
+      const label = customLabel || "link text";
+      const text = link.internalTarget
+        ? `[[${link.internalTarget}${customLabel ? `|${label}` : ""}]]`
+        : `[${label}](${link.href || "https://example.com"})`;
       editor.setRangeText(text, start, editor.selectionEnd, "end");
       editor.setSelectionRange(start + 1, start + 1 + label.length);
       onRawInput();
@@ -1614,6 +1811,7 @@
       heading: ["\n## New heading\n", 4, 15],
       list: ["\n- List item\n", 3, 12],
       "ordered-list": ["\n1. List item\n", 4, 13],
+      checkbox: ["\n- [ ] Task\n", 7, 11],
       tab: ["\n@tab New tab\n@title New tab\n\n# New tab\n", 6, 13],
     };
     const [text, startOffset, endOffset] = templates[kind];
@@ -1627,13 +1825,23 @@
   function onRawKeydown(event) {
     if (event.key === "Enter" && !event.isComposing) {
       event.preventDefault();
-      editor.setRangeText("\n", editor.selectionStart, editor.selectionEnd, "end");
+      const start = editor.selectionStart;
+      const end = editor.selectionEnd;
+      const lineStart = editor.value.lastIndexOf("\n", start - 1) + 1;
+      const line = editor.value.slice(lineStart, start);
+      const orderedItem = start === end && line.match(/^(\s*)(\d+)\.\s+(.+)$/);
+      const nextLine = orderedItem
+        ? `\n${orderedItem[1]}${Number(orderedItem[2]) + 1}. `
+        : "\n";
+      editor.setRangeText(nextLine, start, end, "end");
       onRawInput();
       scheduleRawSelection();
       return;
     }
     if (event.ctrlKey || event.metaKey) {
       const key = event.key.toLowerCase();
+      if (key === "z") { event.preventDefault(); applyHistory(event.shiftKey ? "redo" : "undo"); return; }
+      if (key === "y") { event.preventDefault(); applyHistory("redo"); return; }
       if (key === "b") { event.preventDefault(); wrapRaw("*"); return; }
       if (key === "i") { event.preventDefault(); wrapRaw("_"); return; }
       if (key === "u") { event.preventDefault(); wrapRaw("++"); return; }
@@ -1667,6 +1875,26 @@
 
   function postPreview(message) {
     if (preview.contentWindow) preview.contentWindow.postMessage({ channel: "wmd-studio-preview", ...message }, "*");
+  }
+
+  function rawScrollRatio() {
+    const maximum = Math.max(0, editor.scrollHeight - editor.clientHeight);
+    return maximum ? editor.scrollTop / maximum : 0;
+  }
+
+  function syncPreviewToRawScroll() {
+    if (state.mode === "wmd") postPreview({ type: "scroll-ratio", ratio: rawScrollRatio() });
+  }
+
+  function syncRawToPreviewScroll(message) {
+    if (state.mode !== "wmd") return;
+    const maximumPreview = Math.max(0, Number(message.height) - Number(message.viewport));
+    if (!maximumPreview) return;
+    const ratio = clamp(Number(message.top) / maximumPreview, 0, 1);
+    const maximumRaw = Math.max(0, editor.scrollHeight - editor.clientHeight);
+    const nextTop = maximumRaw * ratio;
+    if (Math.abs(editor.scrollTop - nextTop) < 1) return;
+    editor.scrollTop = nextTop;
   }
 
   function sendPreviewState() {
@@ -1757,6 +1985,7 @@
     }
     if (message.type === "request-link") requestInsert("link");
     if (message.type === "request-find") openFindDialog();
+    if (message.type === "request-history") applyHistory(message.direction === "redo" ? "redo" : "undo");
   }
 
   function handlePreviewMessage(event) {
@@ -1772,6 +2001,7 @@
         left: Number(message.left) || 0,
         top: Number(message.top) || 0,
       };
+      syncRawToPreviewScroll(message);
     }
   }
 
@@ -1833,6 +2063,7 @@
     state.restoreCanvasSelection = false;
     state.previewScroll = { left: 0, top: 0 };
     state.previewFocus = null;
+    resetHistory();
     const draft = readDraft(id);
     state.source = draft ? draft.source : "";
     renderSource();
@@ -1993,22 +2224,21 @@
     editor.addEventListener("scroll", () => {
       highlightLayer.scrollTop = editor.scrollTop;
       highlightLayer.scrollLeft = editor.scrollLeft;
+      syncPreviewToRawScroll();
     });
 
     document.querySelectorAll("[data-command]").forEach((button) => button.addEventListener("click", () => {
       const command = button.dataset.command;
-      if (state.mode === "document") {
+      if (command === "undo" || command === "redo") {
+        applyHistory(command);
+      } else if (state.mode === "document") {
         if (command === "highlight") sendCanvasCommand("highlight");
         else sendCanvasCommand(command);
       } else if (command === "bold") wrapRaw("*");
       else if (command === "italic") wrapRaw("_");
       else if (command === "underline") wrapRaw("++");
+      else if (command === "strikeThrough") wrapRaw("~~");
       else if (command === "highlight") wrapRaw("=");
-      else if (command === "undo" || command === "redo") {
-        editor.focus();
-        document.execCommand(command);
-        setTimeout(onRawInput, 0);
-      }
     }));
     document.querySelectorAll("[data-insert]").forEach((button) => button.addEventListener("click", () => requestInsert(button.dataset.insert)));
     document.querySelectorAll("[data-document-command]").forEach((button) => button.addEventListener("click", () => {
@@ -2045,7 +2275,22 @@
         await navigator.clipboard.writeText(shareUrl());
         toastMessage(settings.syncUrl || location.hostname !== "127.0.0.1" ? "Share link copied." : "Link copied. For remote collaborators, use a public sync server in Settings.");
       } catch (_) {
-        window.prompt("Copy this collaboration link", shareUrl());
+        openShareDialog();
+      }
+    });
+    document.querySelector("#selectShareLinkButton").addEventListener("click", () => {
+      shareLinkInput.focus();
+      shareLinkInput.select();
+    });
+    document.querySelector("#copyShareLinkButton").addEventListener("click", async () => {
+      try {
+        await navigator.clipboard.writeText(shareLinkInput.value);
+        toastMessage("Share link copied.");
+        shareDialog.close("copied");
+      } catch (_) {
+        shareLinkInput.focus();
+        shareLinkInput.select();
+        toastMessage("Link selected. Copy it with Ctrl+C or Cmd+C.");
       }
     });
     panelsButton.addEventListener("click", (event) => { event.stopPropagation(); setPanelMenu(panelMenu.hidden); });

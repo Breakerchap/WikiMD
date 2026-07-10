@@ -68,6 +68,7 @@
         <button data-command="bold" type="button" title="Bold (Ctrl+B)"><b>B</b></button>
         <button data-command="italic" type="button" title="Italic (Ctrl+I)"><i>I</i></button>
         <button class="underline-button" data-command="underline" type="button" title="Underline">U</button>
+        <button class="strike-button" data-command="strikeThrough" type="button" title="Strikethrough">S</button>
         <button data-command="highlight" type="button" title="Highlight">Pen</button>
         <span class="toolbar-divider"></span>
         <button data-insert="link" type="button" title="Insert link (Ctrl+K)">Link</button>
@@ -75,6 +76,7 @@
         <button data-insert="heading" type="button" title="Insert heading">Heading</button>
         <button data-insert="list" type="button" title="Insert bulleted list">Bullets</button>
         <button data-insert="ordered-list" type="button" title="Insert numbered list">Numbered</button>
+        <button data-insert="checkbox" type="button" title="Insert checkbox">Checklist</button>
         <button data-insert="table" type="button" title="Insert table">Table</button>
         <button data-insert="callout" type="button" title="Insert callout">Callout</button>
         <button data-insert="tab" type="button" title="Insert WMD tab">Tab</button>
@@ -128,6 +130,7 @@
               <button class="mobile-edit-button" id="mobileEditButton" type="button">Edit</button>
             </div>
           </div>
+          <nav class="document-tabs" id="documentTabs" aria-label="Document tabs" hidden></nav>
           <div class="warning-list" id="warningList" hidden></div>
           <iframe id="preview" title="Compiled WMD preview" sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox"></iframe>
         </section>
@@ -259,6 +262,24 @@
           <button class="quiet-button" id="findNextButton" type="button">Find next</button>
           <button class="quiet-button" id="replaceButton" type="button">Replace</button>
           <button class="primary-button" id="replaceAllButton" type="button">Replace all</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog class="share-dialog" id="shareDialog">
+      <form method="dialog" id="shareForm">
+        <div class="settings-heading">
+          <div>
+            <span class="eyebrow">Collaboration</span>
+            <h2>Share document</h2>
+          </div>
+          <button class="icon-button settings-close" value="cancel" aria-label="Close share dialog" type="submit">x</button>
+        </div>
+        <p class="insert-dialog-description">Copy this link to let collaborators join this document.</p>
+        <input class="share-link-input" id="shareLinkInput" readonly aria-label="Collaboration link">
+        <div class="settings-actions">
+          <button class="quiet-button" id="selectShareLinkButton" type="button">Select link</button>
+          <button class="primary-button" id="copyShareLinkButton" type="button">Copy link</button>
         </div>
       </form>
     </dialog>
