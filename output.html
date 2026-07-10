@@ -1,0 +1,1031 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>WMD Document</title>
+<style>
+  :root {
+    --bg: #ffffff;
+    --text: #111111;
+    --panel: #f0f0f0;
+    --panel-active: #222222;
+    --panel-active-text: #ffffff;
+    --border: #dddddd;
+    --link: #2454d6;
+    --code: #eeeeee;
+    --muted: #666666;
+    --warning-bg: #fff1c2;
+    --warning-border: #d79b00;
+
+    --font: Arial, sans-serif;
+    --mono-font: Consolas, monospace;
+    --content-base-size: 16px;
+    --title-size: 3rem;
+    --h1-size: 2rem;
+    --h2-size: 1.5rem;
+    --h3-size: 1.25rem;
+    --h4-size: 1.1rem;
+    --h5-size: 1rem;
+    --h6-size: 0.9rem;
+    --content-line-height: 1.6;
+    --content-width: 900px;
+  }
+
+  body.dark {
+    --bg: #121212;
+    --text: #eeeeee;
+    --panel: #242424;
+    --panel-active: #dddddd;
+    --panel-active-text: #111111;
+    --border: #444444;
+    --link: #8ab4ff;
+    --code: #2d2d2d;
+    --muted: #aaaaaa;
+    --warning-bg: #3a2d00;
+    --warning-border: #d79b00;
+  }
+
+  body {
+    margin: 0;
+    font-family: var(--font);
+    font-size: 16px;
+    background: var(--bg);
+    color: var(--text);
+  }
+
+  a {
+    color: var(--link);
+  }
+
+  .broken-link {
+    color: #c62828;
+    text-decoration: underline wavy;
+  }
+
+  .layout {
+    display: flex;
+    min-height: 100vh;
+  }
+
+  .sidebar {
+    width: 280px;
+    flex-shrink: 0;
+    border-right: 2px solid var(--border);
+    background: var(--panel);
+    padding: 16px;
+    box-sizing: border-box;
+    position: sticky;
+    top: 0;
+    height: 100vh;
+    overflow-y: auto;
+  }
+
+  .sidebar-title {
+    font-size: 1.1rem;
+    margin: 0 0 12px;
+  }
+
+  .dark-toggle {
+    padding: 9px;
+    cursor: pointer;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg);
+    color: var(--text);
+    font-size: 0.95rem;
+    font-family: inherit;
+  }
+
+  .tab-button {
+    display: block;
+    width: 100%;
+    border: none;
+    background: transparent;
+    color: var(--text);
+    padding: 10px;
+    margin-bottom: 6px;
+    text-align: left;
+    cursor: pointer;
+    border-radius: 6px;
+    font-size: 1rem;
+    font-family: inherit;
+  }
+
+  .tab-button.active {
+    background: var(--panel-active);
+    color: var(--panel-active-text);
+  }
+
+  .search-box {
+    width: 100%;
+    box-sizing: border-box;
+    margin: 18px 0 10px;
+    padding: 9px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg);
+    color: var(--text);
+    font-size: 1rem;
+    font-family: inherit;
+  }
+
+  .heading-results {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    border-left: 2px solid var(--border);
+    margin-left: 6px;
+  }
+
+  .heading-result {
+    display: block;
+    width: 100%;
+    border: none;
+    background: transparent;
+    color: var(--text);
+    padding-top: 6px;
+    padding-right: 8px;
+    padding-bottom: 6px;
+    text-align: left;
+    cursor: pointer;
+    border-radius: 0 6px 6px 0;
+    font-size: 0.92rem;
+    font-family: inherit;
+  }
+
+  .heading-result:hover {
+    background: var(--bg);
+  }
+
+  .heading-result.heading-level-1 { padding-left: 14px; }
+  .heading-result.heading-level-2 { padding-left: 26px; }
+  .heading-result.heading-level-3 { padding-left: 38px; }
+  .heading-result.heading-level-4 { padding-left: 50px; }
+  .heading-result.heading-level-5 { padding-left: 62px; }
+  .heading-result.heading-level-6 { padding-left: 74px; }
+
+  .heading-result-text {
+    display: block;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .heading-result-tab {
+    display: none;
+    opacity: 0.65;
+    font-size: 0.8rem;
+  }
+
+  body.heading-search-active .heading-result-tab {
+    display: block;
+  }
+
+  .dark-toggle {
+    width: 100%;
+    margin-top: 20px;
+  }
+
+  .warning-panel {
+    margin-top: 20px;
+    padding: 10px;
+    border-left: 4px solid var(--warning-border);
+    background: var(--warning-bg);
+    border-radius: 6px;
+    font-size: 0.85rem;
+  }
+
+  .warning-panel h3 {
+    font-size: 0.95rem;
+    margin: 0 0 8px;
+  }
+
+  .warning-panel p {
+    margin: 0 0 8px;
+  }
+
+  main {
+    width: 100%;
+    max-width: var(--content-width);
+    padding: 40px;
+    box-sizing: border-box;
+  }
+
+  .tab-section {
+    display: none;
+    font-size: var(--content-base-size);
+    line-height: var(--content-line-height);
+  }
+
+  .tab-section.active {
+    display: block;
+  }
+
+  .tab-title {
+    font-size: var(--title-size);
+    margin-top: 0;
+    margin-bottom: 1rem;
+  }
+
+  .tab-section h1 {
+    font-size: var(--h1-size);
+  }
+
+  .tab-section h2 {
+    font-size: var(--h2-size);
+  }
+
+  .tab-section h3 {
+    font-size: var(--h3-size);
+  }
+
+  .tab-section h4 {
+    font-size: var(--h4-size);
+  }
+
+  .tab-section h5 {
+    font-size: var(--h5-size);
+  }
+
+  .tab-section h6 {
+    font-size: var(--h6-size);
+  }
+
+  code,
+  pre {
+    font-family: var(--mono-font);
+  }
+
+  code {
+    background: var(--code);
+    padding: 0.15em 0.3em;
+    border-radius: 4px;
+  }
+
+  pre code {
+    display: block;
+    padding: 1em;
+    overflow-x: auto;
+  }
+
+  .highlight {
+    padding: 0.08em 0.25em;
+    border-radius: 4px;
+  }
+
+  .highlight-1 {
+    background: #fff59d;
+    color: #111111;
+  }
+
+  .highlight-2 {
+    background: #ffd59e;
+    color: #111111;
+  }
+
+  .highlight-3 {
+    background: #ffb3b3;
+    color: #111111;
+  }
+
+  .callout {
+    border-left: 5px solid #888888;
+    background: color-mix(in srgb, var(--panel) 70%, var(--bg));
+    padding: 0.9rem 1rem;
+    margin: 1rem 0;
+    border-radius: 8px;
+  }
+
+  .callout-title {
+    font-weight: bold;
+    margin-bottom: 0.4rem;
+  }
+
+  .callout-body > :first-child {
+    margin-top: 0;
+  }
+
+  .callout-body > :last-child {
+    margin-bottom: 0;
+  }
+
+  .callout-note,
+  .callout-info {
+    border-left-color: #3f7bd8;
+  }
+
+  .callout-tip {
+    border-left-color: #2e9d57;
+  }
+
+  .callout-warning {
+    border-left-color: #d98b00;
+  }
+
+  .callout-danger {
+    border-left-color: #c62828;
+  }
+
+  .callout-rule {
+    border-left-color: #7e57c2;
+  }
+
+  .callout-example {
+    border-left-color: #b9a500;
+  }
+
+  .collapse {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    margin: 1rem 0;
+    background: color-mix(in srgb, var(--panel) 55%, var(--bg));
+  }
+
+  .collapse summary {
+    cursor: pointer;
+    padding: 0.8rem 1rem;
+    font-weight: bold;
+  }
+
+  .collapse-body {
+    padding: 0 1rem 1rem;
+  }
+
+  .toc {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1rem;
+    margin: 1rem 0;
+    background: color-mix(in srgb, var(--panel) 55%, var(--bg));
+  }
+
+  .toc-title {
+    font-weight: bold;
+    margin-bottom: 0.6rem;
+  }
+
+  .toc-link {
+    display: block;
+    text-decoration: none;
+    margin: 0.25rem 0;
+  }
+
+  .toc-link:hover {
+    text-decoration: underline;
+  }
+
+  .toc-level-2 { margin-left: 1rem; }
+  .toc-level-3 { margin-left: 2rem; }
+  .toc-level-4 { margin-left: 3rem; }
+  .toc-level-5 { margin-left: 4rem; }
+  .toc-level-6 { margin-left: 5rem; }
+
+  .toc-empty {
+    color: var(--muted);
+    margin: 0;
+  }
+
+  .collapsible-heading {
+    cursor: pointer;
+    user-select: none;
+    scroll-margin-top: 1rem;
+  }
+
+  .heading-collapse-marker {
+    display: inline-block;
+    width: 1.1em;
+    color: var(--muted);
+    font-size: 0.85em;
+  }
+
+  .collapsible-heading:hover .heading-collapse-marker {
+    color: var(--text);
+  }
+
+  .heading-hidden-by-collapse {
+    display: none !important;
+  }
+
+</style>
+</head>
+<body>
+
+<div class="layout">
+  <aside class="sidebar">
+    <h2 class="sidebar-title">Tabs</h2>
+
+    <button class="tab-button active" type="button" data-tab-id="home">Home</button>
+<button class="tab-button " type="button" data-tab-id="combat">Combat</button>
+<button class="tab-button " type="button" data-tab-id="magic">Magic</button>
+
+    <input
+      class="search-box"
+      id="headingSearch"
+      placeholder="Search headings..."
+    >
+
+    <div class="heading-results" id="headingResults">
+      
+<button
+  class="heading-result heading-level-1"
+  type="button"
+  data-search="home welcome"
+  data-tab-id="home"
+  data-heading-id="home-welcome"
+  data-level="1"
+>
+  <span class="heading-result-text">Welcome</span>
+  <span class="heading-result-tab">Home</span>
+</button>
+
+<button
+  class="heading-result heading-level-2"
+  type="button"
+  data-search="home links"
+  data-tab-id="home"
+  data-heading-id="home-links"
+  data-level="2"
+>
+  <span class="heading-result-text">Links</span>
+  <span class="heading-result-tab">Home</span>
+</button>
+
+<button
+  class="heading-result heading-level-2"
+  type="button"
+  data-search="home callouts"
+  data-tab-id="home"
+  data-heading-id="home-callouts"
+  data-level="2"
+>
+  <span class="heading-result-text">Callouts</span>
+  <span class="heading-result-tab">Home</span>
+</button>
+
+<button
+  class="heading-result heading-level-3"
+  type="button"
+  data-search="home you can also do more tiers of headings"
+  data-tab-id="home"
+  data-heading-id="home-you-can-also-do-more-tiers-of-headings"
+  data-level="3"
+>
+  <span class="heading-result-text">You can also do more tiers of headings</span>
+  <span class="heading-result-tab">Home</span>
+</button>
+
+<button
+  class="heading-result heading-level-4"
+  type="button"
+  data-search="home like even more"
+  data-tab-id="home"
+  data-heading-id="home-like-even-more"
+  data-level="4"
+>
+  <span class="heading-result-text">Like even more</span>
+  <span class="heading-result-tab">Home</span>
+</button>
+
+<button
+  class="heading-result heading-level-5"
+  type="button"
+  data-search="home 5 enough for you?"
+  data-tab-id="home"
+  data-heading-id="home-5-enough-for-you"
+  data-level="5"
+>
+  <span class="heading-result-text">5 enough for you?</span>
+  <span class="heading-result-tab">Home</span>
+</button>
+
+<button
+  class="heading-result heading-level-6"
+  type="button"
+  data-search="home no?"
+  data-tab-id="home"
+  data-heading-id="home-no"
+  data-level="6"
+>
+  <span class="heading-result-text">No?</span>
+  <span class="heading-result-tab">Home</span>
+</button>
+
+<button
+  class="heading-result heading-level-2"
+  type="button"
+  data-search="home collapse"
+  data-tab-id="home"
+  data-heading-id="home-collapse"
+  data-level="2"
+>
+  <span class="heading-result-text">Collapse</span>
+  <span class="heading-result-tab">Home</span>
+</button>
+
+<button
+  class="heading-result heading-level-2"
+  type="button"
+  data-search="home include"
+  data-tab-id="home"
+  data-heading-id="home-include"
+  data-level="2"
+>
+  <span class="heading-result-text">Include</span>
+  <span class="heading-result-tab">Home</span>
+</button>
+
+<button
+  class="heading-result heading-level-2"
+  type="button"
+  data-search="home damage"
+  data-tab-id="home"
+  data-heading-id="home-damage"
+  data-level="2"
+>
+  <span class="heading-result-text">Damage</span>
+  <span class="heading-result-tab">Home</span>
+</button>
+
+<button
+  class="heading-result heading-level-1"
+  type="button"
+  data-search="combat combat"
+  data-tab-id="combat"
+  data-heading-id="combat-combat"
+  data-level="1"
+>
+  <span class="heading-result-text">Combat</span>
+  <span class="heading-result-tab">Combat</span>
+</button>
+
+<button
+  class="heading-result heading-level-2"
+  type="button"
+  data-search="combat attacking"
+  data-tab-id="combat"
+  data-heading-id="combat-attacking"
+  data-level="2"
+>
+  <span class="heading-result-text">Attacking</span>
+  <span class="heading-result-tab">Combat</span>
+</button>
+
+<button
+  class="heading-result heading-level-2"
+  type="button"
+  data-search="combat damage"
+  data-tab-id="combat"
+  data-heading-id="combat-damage"
+  data-level="2"
+>
+  <span class="heading-result-text">Damage</span>
+  <span class="heading-result-tab">Combat</span>
+</button>
+
+<button
+  class="heading-result heading-level-2"
+  type="button"
+  data-search="combat code block"
+  data-tab-id="combat"
+  data-heading-id="combat-code-block"
+  data-level="2"
+>
+  <span class="heading-result-text">Code Block</span>
+  <span class="heading-result-tab">Combat</span>
+</button>
+
+<button
+  class="heading-result heading-level-1"
+  type="button"
+  data-search="magic magic"
+  data-tab-id="magic"
+  data-heading-id="magic-magic"
+  data-level="1"
+>
+  <span class="heading-result-text">Magic</span>
+  <span class="heading-result-tab">Magic</span>
+</button>
+
+<button
+  class="heading-result heading-level-2"
+  type="button"
+  data-search="magic spell costs"
+  data-tab-id="magic"
+  data-heading-id="magic-spell-costs"
+  data-level="2"
+>
+  <span class="heading-result-text">Spell Costs</span>
+  <span class="heading-result-tab">Magic</span>
+</button>
+
+<button
+  class="heading-result heading-level-2"
+  type="button"
+  data-search="magic embed"
+  data-tab-id="magic"
+  data-heading-id="magic-embed"
+  data-level="2"
+>
+  <span class="heading-result-text">Embed</span>
+  <span class="heading-result-tab">Magic</span>
+</button>
+
+<button
+  class="heading-result heading-level-2"
+  type="button"
+  data-search="magic attacking"
+  data-tab-id="magic"
+  data-heading-id="magic-attacking"
+  data-level="2"
+>
+  <span class="heading-result-text">Attacking</span>
+  <span class="heading-result-tab">Magic</span>
+</button>
+    </div>
+
+    <button class="dark-toggle" id="darkToggle" type="button">Dark mode</button>
+
+    
+  </aside>
+
+  <main>
+    
+<section id="home" class="tab-section active " data-hidden="false">
+<h1 class="tab-title">Wiki Markdown Example</h1>
+<h1 id="home-welcome">Welcome</h1>
+<nav class="toc">
+<div class="toc-title">Contents</div>
+<a class="toc-link toc-level-1" href="#home-welcome">Welcome</a>
+<a class="toc-link toc-level-2" href="#home-links">Links</a>
+<a class="toc-link toc-level-2" href="#home-callouts">Callouts</a>
+<a class="toc-link toc-level-2" href="#home-collapse">Collapse</a>
+<a class="toc-link toc-level-2" href="#home-include">Include</a>
+<a class="toc-link toc-level-2" href="#home-damage">Damage</a>
+</nav>
+<p>This is a simple WMD document.</p>
+<p>Here is <strong>bold text</strong>.</p>
+<p>Here is <em>italic text</em>.</p>
+<p>Here is <code>inline code</code>.</p>
+<p><span class="highlight highlight-1">Yellow highlight</span></p>
+<p><span class="highlight highlight-2">Orange highlight</span></p>
+<p><span class="highlight highlight-3">Red highlight</span></p>
+<h2 id="home-links">Links</h2>
+<p><a href="#combat">Combat</a></p>
+<p><a href="#combat-damage">Combat#Damage</a></p>
+<p><a href="#combat-damage">Read the damage rules</a></p>
+<h2 id="home-callouts">Callouts</h2>
+<div class="callout callout-note">
+<div class="callout-title">Note</div>
+<div class="callout-body">
+<p>This is a normal note.</p>
+</div>
+</div>
+<div class="callout callout-warning">
+<div class="callout-title">Warning</div>
+<div class="callout-body">
+<p>This is for important stuff.</p>
+</div>
+</div>
+<div class="callout callout-rule">
+<div class="callout-title">Rule</div>
+<div class="callout-body">
+<p>This is for actual rules.</p>
+</div>
+</div>
+<div class="callout callout-example">
+<div class="callout-title">Example</div>
+<div class="callout-body">
+<p>This is for examples.</p>
+</div>
+</div>
+<h3 id="home-you-can-also-do-more-tiers-of-headings">You can also do more tiers of headings</h3>
+<p>:)</p>
+<h4 id="home-like-even-more">Like even more</h4>
+<p>:}</p>
+<h5 id="home-5-enough-for-you">5 enough for you?</h5>
+<p>…</p>
+<h6 id="home-no">No?</h6>
+<p>Ok, thats enough</p>
+<h2 id="home-collapse">Collapse</h2>
+<details class="collapse">
+<summary>Click to reveal</summary>
+<div class="collapse-body">
+<p>This text starts hidden.</p>
+<ul>
+<li>list item</li>
+<li><strong>bold</strong></li>
+<li><a href="#combat-attacking">Combat#Attacking</a></li>
+</ul>
+</div>
+</details>
+<h2 id="home-include">Include</h2>
+<h2 id="home-damage">Damage</h2>
+<p>Damage uses this formula:</p>
+<p><code>Weapon + Stat + Margin - Armour</code></p>
+<p><span class="highlight highlight-2">Armour reduces damage after the margin bonus is added.</span></p>
+<hr>
+
+</section>
+
+<section id="combat" class="tab-section  " data-hidden="false">
+<h1 class="tab-title">Combat Rules</h1>
+<h1 id="combat-combat">Combat</h1>
+<nav class="toc">
+<div class="toc-title">Contents</div>
+<a class="toc-link toc-level-1" href="#combat-combat">Combat</a>
+<a class="toc-link toc-level-2" href="#combat-attacking">Attacking</a>
+<a class="toc-link toc-level-2" href="#combat-damage">Damage</a>
+<a class="toc-link toc-level-2" href="#combat-code-block">Code Block</a>
+</nav>
+<h2 id="combat-attacking">Attacking</h2>
+<p>To attack, compare your Attack Score against the defender’s Defence Score.</p>
+<div class="callout callout-note">
+<div class="callout-title">Quick reminder</div>
+<div class="callout-body">
+<p>Higher margin means more damage.</p>
+</div>
+</div>
+<h2 id="combat-damage">Damage</h2>
+<p>Damage uses this formula:</p>
+<p><code>Weapon + Stat + Margin - Armour</code></p>
+<p><span class="highlight highlight-2">Armour reduces damage after the margin bonus is added.</span></p>
+<h2 id="combat-code-block">Code Block</h2>
+<pre><code class="language-js">function attack() {
+  return &quot;stab&quot;;
+}
+</code></pre>
+<hr>
+
+</section>
+
+<section id="magic" class="tab-section  " data-hidden="false">
+<h1 class="tab-title">Magic Rules</h1>
+<h1 id="magic-magic">Magic</h1>
+<h2 id="magic-spell-costs">Spell Costs</h2>
+<p>Spells cost energy based on strength, range, and duration.</p>
+<p><span class="highlight highlight-3">Very strong spells should have a drawback or component.</span></p>
+<h2 id="magic-embed">Embed</h2>
+<h2 id="magic-attacking">Attacking</h2>
+<p>To attack, compare your Attack Score against the defender’s Defence Score.</p>
+<div class="callout callout-note">
+<div class="callout-title">Quick reminder</div>
+<div class="callout-body">
+<p>Higher margin means more damage.</p>
+</div>
+</div>
+<hr>
+
+</section>
+
+<section id="gm-notes" class="tab-section  hidden-tab" data-hidden="true">
+<h1 class="tab-title">Hidden GM Notes</h1>
+<h1 id="gm-notes-gm-notes">GM Notes</h1>
+<h2 id="gm-notes-secret-rule">Secret Rule</h2>
+<p>This tab is hidden from the sidebar and heading search.</p>
+<p><a href="#gm-notes-secret-rule">GM Notes#Secret Rule</a></p>
+<div class="callout callout-warning">
+<div class="callout-title">Hidden tab</div>
+<div class="callout-body">
+<p>Use hidden tabs for spoilers, draft rules, or GM-only notes.</p>
+</div>
+</div>
+
+</section>
+  </main>
+</div>
+
+<script>
+  function getActiveTabId() {
+    var active = document.querySelector(".tab-section.active");
+    return active ? active.id : "";
+  }
+
+  function getHeadingLevel(heading) {
+    return Number(heading.tagName.slice(1));
+  }
+
+  function isCollapsibleHeading(node) {
+    return node && /^H[1-6]$/.test(node.tagName) && node.classList.contains("collapsible-heading");
+  }
+
+  function updateHeadingVisibility(section) {
+    if (!section) return;
+
+    var stack = [];
+    Array.from(section.children).forEach(function(node) {
+      if (isCollapsibleHeading(node)) {
+        var level = getHeadingLevel(node);
+
+        stack = stack.filter(function(item) {
+          return item.level < level;
+        });
+
+        var hiddenByParent = stack.some(function(item) {
+          return item.collapsed;
+        });
+
+        node.classList.toggle("heading-hidden-by-collapse", hiddenByParent);
+
+        var marker = node.querySelector(".heading-collapse-marker");
+        var collapsed = node.dataset.collapsed === "true";
+        if (marker) marker.textContent = collapsed ? "▸" : "▾";
+
+        stack.push({ level: level, collapsed: collapsed || hiddenByParent });
+        return;
+      }
+
+      var hidden = stack.some(function(item) {
+        return item.collapsed;
+      });
+
+      node.classList.toggle("heading-hidden-by-collapse", hidden);
+    });
+  }
+
+  function setupCollapsibleHeadings() {
+    document.querySelectorAll(".tab-section h1, .tab-section h2, .tab-section h3, .tab-section h4, .tab-section h5, .tab-section h6").forEach(function(heading) {
+      if (heading.classList.contains("tab-title")) return;
+      if (heading.classList.contains("collapsible-heading")) return;
+
+      heading.classList.add("collapsible-heading");
+      heading.dataset.collapsed = "false";
+
+      var marker = document.createElement("span");
+      marker.className = "heading-collapse-marker";
+      marker.textContent = "▾";
+      marker.setAttribute("aria-hidden", "true");
+      heading.insertBefore(marker, heading.firstChild);
+
+      heading.addEventListener("click", function(event) {
+        var link = event.target.closest("a");
+        if (link) return;
+
+        heading.dataset.collapsed = heading.dataset.collapsed === "true" ? "false" : "true";
+        updateHeadingVisibility(heading.closest(".tab-section"));
+      });
+    });
+
+    document.querySelectorAll(".tab-section").forEach(updateHeadingVisibility);
+  }
+
+  function expandAncestorsForHeading(heading) {
+    if (!heading) return;
+
+    var neededLevel = getHeadingLevel(heading);
+    var node = heading.previousElementSibling;
+
+    while (node) {
+      if (isCollapsibleHeading(node)) {
+        var level = getHeadingLevel(node);
+
+        if (level < neededLevel) {
+          node.dataset.collapsed = "false";
+          neededLevel = level;
+        }
+      }
+
+      node = node.previousElementSibling;
+    }
+
+    updateHeadingVisibility(heading.closest(".tab-section"));
+  }
+
+  function updateHeadingList() {
+    var search = document.getElementById("headingSearch");
+    var query = search ? search.value.trim().toLowerCase() : "";
+    var activeTabId = getActiveTabId();
+    var searching = query.length > 0;
+
+    document.body.classList.toggle("heading-search-active", searching);
+
+    document.querySelectorAll(".heading-result").forEach(function(item) {
+      var matchesSearch = item.dataset.search.includes(query);
+      var matchesCurrentTab = item.dataset.tabId === activeTabId;
+      item.style.display = (searching ? matchesSearch : matchesCurrentTab) ? "block" : "none";
+    });
+  }
+
+  function openTab(id, pushHistory) {
+    if (pushHistory === undefined) pushHistory = true;
+
+    document.querySelectorAll(".tab-section").forEach(function(section) {
+      section.classList.remove("active");
+    });
+
+    document.querySelectorAll(".tab-button").forEach(function(button) {
+      button.classList.remove("active");
+    });
+
+    var section = document.getElementById(id);
+    if (!section) return;
+
+    section.classList.add("active");
+
+    var buttons = Array.from(document.querySelectorAll(".tab-button"));
+    var button = buttons.find(function(btn) {
+      return btn.dataset.tabId === id;
+    });
+
+    if (button) button.classList.add("active");
+
+    updateHeadingList();
+    updateHeadingVisibility(section);
+
+    if (pushHistory && location.hash !== "#" + id) {
+      history.pushState({ tab: id }, "", "#" + id);
+    }
+  }
+
+  function jumpToHeading(tabId, headingId) {
+    openTab(tabId, false);
+
+    if (location.hash !== "#" + headingId) {
+      history.pushState({ tab: tabId, heading: headingId }, "", "#" + headingId);
+    }
+
+    setTimeout(function() {
+      var heading = document.getElementById(headingId);
+      if (heading) {
+        expandAncestorsForHeading(heading);
+        heading.scrollIntoView();
+      }
+    }, 0);
+  }
+
+  function filterHeadings() {
+    updateHeadingList();
+  }
+
+  function toggleDarkMode() {
+    document.body.classList.toggle("dark");
+    localStorage.setItem("darkMode", document.body.classList.contains("dark"));
+  }
+
+  function syncFromHash() {
+    var hash = location.hash.slice(1);
+
+    if (!hash) {
+      openTab("home", false);
+      return;
+    }
+
+    var directTab = document.getElementById(hash);
+    if (directTab && directTab.classList.contains("tab-section")) {
+      openTab(hash, false);
+      return;
+    }
+
+    var matchingTab = Array.from(document.querySelectorAll(".tab-section"))
+      .find(function(section) {
+        return hash.startsWith(section.id + "-");
+      });
+
+    if (matchingTab) {
+      openTab(matchingTab.id, false);
+
+      setTimeout(function() {
+        var target = document.getElementById(hash);
+        if (target) {
+          expandAncestorsForHeading(target);
+          target.scrollIntoView();
+        }
+      }, 0);
+    }
+  }
+
+  if (localStorage.getItem("darkMode") === "true") {
+    document.body.classList.add("dark");
+  }
+
+  setupCollapsibleHeadings();
+
+  document.querySelectorAll(".tab-button").forEach(function(button) {
+    button.addEventListener("click", function() {
+      openTab(button.dataset.tabId);
+    });
+  });
+
+  document.querySelectorAll(".heading-result").forEach(function(button) {
+    button.addEventListener("click", function() {
+      jumpToHeading(button.dataset.tabId, button.dataset.headingId);
+    });
+  });
+
+  var headingSearch = document.getElementById("headingSearch");
+  if (headingSearch) {
+    headingSearch.addEventListener("input", filterHeadings);
+  }
+
+  var darkToggle = document.getElementById("darkToggle");
+  if (darkToggle) {
+    darkToggle.addEventListener("click", toggleDarkMode);
+  }
+
+  window.addEventListener("popstate", syncFromHash);
+  window.addEventListener("hashchange", syncFromHash);
+  syncFromHash();
+  updateHeadingList();
+</script>
+
+</body>
+</html>
