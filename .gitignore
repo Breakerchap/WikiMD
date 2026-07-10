@@ -1,0 +1,8 @@
+node_modules/
+
+# Generated previews and compiled output
+*.html
+
+# Local editor/system noise
+.DS_Store
+Thumbs.db

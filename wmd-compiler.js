@@ -1,8 +1,12 @@
 const fs = require("fs");
+const http = require("http");
+const path = require("path");
 const MarkdownIt = require("markdown-it");
 
-const inputPath = "example.wmd";
-const outputPath = "output.html";
+const DEFAULT_INPUT_PATH = "example.wmd";
+const DEFAULT_OUTPUT_PATH = "output.html";
+const DEFAULT_PORT = 4312;
+const WATCH_DEBOUNCE_MS = 120;
 
 function slugify(text) {
   return String(text || "")
@@ -31,9 +35,13 @@ function cleanHeadingText(text) {
   return String(text || "")
     .replace(/`([^`]+)`/g, "$1")
     .replace(/\[\[([^\]|]+\|)?([^\]]+)\]\]/g, "$2")
-    .replace(/\[([^\]]+)\]\([^\)]+\)/g, "$1")
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
     .replace(/[*_`#=]/g, "")
     .trim();
+}
+
+function stripBom(text) {
+  return String(text || "").replace(/^\uFEFF/, "");
 }
 
 function parseTarget(target) {
@@ -77,14 +85,18 @@ function wikiLinkPlugin(md) {
 
     if (!target.tabSlug) return false;
 
+    const tabId = state.env.tabAnchors && state.env.tabAnchors.get(target.tabSlug);
+    const headingKey = `${target.tabSlug}-${target.headingSlug}`;
+    const headingId = target.headingSlug && state.env.headingAnchors
+      ? state.env.headingAnchors.get(headingKey)
+      : "";
     const href = target.headingSlug
-      ? `#${target.tabSlug}-${target.headingSlug}`
-      : `#${target.tabSlug}`;
+      ? `#${headingId || headingKey}`
+      : `#${tabId || target.tabSlug}`;
 
     const label = labelRaw || targetRaw;
-    const tabExists = state.env.tabSlugs && state.env.tabSlugs.has(target.tabSlug);
-    const headingExists = !target.headingSlug
-      || (state.env.headingIds && state.env.headingIds.has(`${target.tabSlug}-${target.headingSlug}`));
+    const tabExists = Boolean(tabId);
+    const headingExists = !target.headingSlug || Boolean(headingId);
     const isBroken = !tabExists || !headingExists;
 
     if (isBroken && state.env.warnings) {
@@ -284,7 +296,7 @@ function calloutPlugin(md) {
   };
 
   md.renderer.rules.wmd_callout_close = () => {
-    return `</div>\n</div>\n`;
+    return "</div>\n</div>\n";
   };
 }
 
@@ -337,7 +349,7 @@ function collapsePlugin(md) {
   };
 
   md.renderer.rules.wmd_collapse_close = () => {
-    return `</div>\n</details>\n`;
+    return "</div>\n</details>\n";
   };
 }
 
@@ -364,14 +376,14 @@ function tocPlugin(md) {
 
   md.renderer.rules.wmd_toc = (tokens, idx, options, env) => {
     const depth = tokens[idx].meta.depth;
-    const headings = (env.currentTabHeadings || []).filter(heading => heading.level <= depth);
+    const headings = (env.currentTabHeadings || []).filter((heading) => heading.level <= depth);
 
     if (!headings.length) {
-      return `<nav class="toc"><div class="toc-title">Contents</div><p class="toc-empty">No headings in this tab.</p></nav>\n`;
+      return '<nav class="toc"><div class="toc-title">Contents</div><p class="toc-empty">No headings in this tab.</p></nav>\n';
     }
 
     const items = headings
-      .map(heading => {
+      .map((heading) => {
         return `<a class="toc-link toc-level-${heading.level}" href="#${escapeHtml(heading.id)}">${escapeHtml(heading.text)}</a>`;
       })
       .join("\n");
@@ -414,8 +426,21 @@ function parseTabLine(line) {
   return { name, hidden };
 }
 
+function createTab(name, hidden) {
+  return {
+    name,
+    title: null,
+    hidden,
+    content: [],
+    resolvedContent: "",
+    headings: [],
+    refSlug: "",
+    domId: "",
+  };
+}
+
 function parseWmd(source) {
-  const lines = source.split(/\r?\n/);
+  const lines = stripBom(source).split(/\r?\n/);
 
   const config = {
     font: "Arial, sans-serif",
@@ -459,16 +484,7 @@ function parseWmd(source) {
 
     if (line.startsWith("@tab ")) {
       const tabInfo = parseTabLine(line);
-
-      currentTab = {
-        name: tabInfo.name,
-        title: null,
-        hidden: tabInfo.hidden,
-        content: [],
-        resolvedContent: "",
-        headings: [],
-      };
-
+      currentTab = createTab(tabInfo.name, tabInfo.hidden);
       tabs.push(currentTab);
       continue;
     }
@@ -476,15 +492,7 @@ function parseWmd(source) {
     if (!currentTab) {
       if (line.trim() === "") continue;
 
-      currentTab = {
-        name: "Main",
-        title: null,
-        hidden: false,
-        content: [],
-        resolvedContent: "",
-        headings: [],
-      };
-
+      currentTab = createTab("Main", false);
       tabs.push(currentTab);
     }
 
@@ -504,64 +512,135 @@ function parseWmd(source) {
   return { config, vars, tabs };
 }
 
-function collectHeadings(markdown, tab) {
-  const tabSlug = slugify(tab.name);
+function finalizeTabs(tabs, warnings) {
+  const tabsBySlug = new Map();
+  const domIdCounts = new Map();
+
+  tabs.forEach((tab, index) => {
+    if (!tab.name.trim()) {
+      tab.name = `Tab ${index + 1}`;
+      warnings.push(`Unnamed tab detected at position ${index + 1}; using "${tab.name}".`);
+    }
+
+    const refSlug = slugify(tab.name) || `tab-${index + 1}`;
+    const domCount = (domIdCounts.get(refSlug) || 0) + 1;
+
+    domIdCounts.set(refSlug, domCount);
+    tab.refSlug = refSlug;
+    tab.domId = domCount === 1 ? refSlug : `${refSlug}-${domCount}`;
+
+    if (tabsBySlug.has(refSlug)) {
+      warnings.push(`Duplicate tab name "${tab.name}" detected; links and includes will target the first matching tab.`);
+      return;
+    }
+
+    tabsBySlug.set(refSlug, tab);
+  });
+
+  return tabsBySlug;
+}
+
+function inlineTextFromChildren(children) {
+  if (!Array.isArray(children)) return "";
+
+  return children
+    .map((child) => {
+      if (child.type === "text" || child.type === "code_inline") {
+        return child.content;
+      }
+
+      if (child.type === "softbreak" || child.type === "hardbreak") {
+        return " ";
+      }
+
+      if (child.type === "image") {
+        return child.content || "";
+      }
+
+      return "";
+    })
+    .join("");
+}
+
+function createUniqueId(baseId, counts) {
+  const count = (counts.get(baseId) || 0) + 1;
+  counts.set(baseId, count);
+  return count === 1 ? baseId : `${baseId}-${count}`;
+}
+
+function collectHeadings(md, tab) {
+  const tokens = md.parse(tab.resolvedContent, {});
   const headings = [];
+  const idCounts = new Map();
 
-  for (const line of markdown.split(/\r?\n/)) {
-    const match = line.trim().match(/^(#{1,6})\s+(.+)$/);
-    if (!match) continue;
+  for (let i = 0; i < tokens.length; i++) {
+    const open = tokens[i];
+    if (open.type !== "heading_open") continue;
 
-    const level = match[1].length;
-    const text = cleanHeadingText(match[2]);
+    const inline = tokens[i + 1];
+    const rawText = cleanHeadingText(inlineTextFromChildren(inline && inline.children));
+    const text = rawText || `Section ${headings.length + 1}`;
+    const headingSlug = slugify(rawText) || `section-${headings.length + 1}`;
+    const anchorKey = `${tab.refSlug}-${headingSlug}`;
+    const baseId = `${tab.domId}-${headingSlug}`;
+    const id = createUniqueId(baseId, idCounts);
 
     headings.push({
       tabName: tab.name,
-      tabSlug,
-      level,
+      tabRefSlug: tab.refSlug,
+      tabDomId: tab.domId,
+      level: Number(open.tag.slice(1)),
       text,
       hidden: tab.hidden,
-      id: `${tabSlug}-${slugify(text)}`,
+      anchorKey,
+      id,
     });
   }
 
   return headings;
 }
 
-function addHeadingIds(html, tabName) {
-  const tabSlug = slugify(tabName);
+function applyHeadingIdsToTokens(tokens, headings) {
+  let headingIndex = 0;
 
-  return html.replace(/<h([1-6])>(.*?)<\/h\1>/g, (match, level, text) => {
-    const plainText = text.replace(/<[^>]*>/g, "");
-    const headingSlug = slugify(plainText);
-    const id = `${tabSlug}-${headingSlug}`;
+  for (const token of tokens) {
+    if (token.type !== "heading_open") continue;
 
-    return `<h${level} id="${id}">${text}</h${level}>`;
-  });
+    const heading = headings[headingIndex];
+    headingIndex += 1;
+
+    if (heading) {
+      token.attrSet("id", heading.id);
+    }
+  }
 }
 
 function extractHeadingSection(markdown, headingName) {
   const lines = markdown.split(/\r?\n/);
+  const md = makeMarkdownIt();
+  const tokens = md.parse(markdown, {});
   const wantedSlug = slugify(headingName);
   let start = -1;
   let startLevel = 0;
   let end = lines.length;
 
-  for (let i = 0; i < lines.length; i++) {
-    const match = lines[i].trim().match(/^(#{1,6})\s+(.+)$/);
-    if (!match) continue;
+  for (let i = 0; i < tokens.length; i++) {
+    const open = tokens[i];
+    if (open.type !== "heading_open") continue;
 
-    const level = match[1].length;
-    const text = cleanHeadingText(match[2]);
+    const inline = tokens[i + 1];
+    const level = Number(open.tag.slice(1));
+    const text = cleanHeadingText(inlineTextFromChildren(inline && inline.children));
+    const lineNumber = open.map ? open.map[0] : -1;
 
     if (start === -1 && slugify(text) === wantedSlug) {
-      start = i;
+      start = lineNumber;
       startLevel = level;
       continue;
     }
 
     if (start !== -1 && level <= startLevel) {
-      end = i;
+      end = lineNumber;
       break;
     }
   }
@@ -653,7 +732,6 @@ function makeMarkdownIt() {
   });
 
   md.disable("emphasis");
-
   md.use(wikiLinkPlugin);
   md.use(customBoldPlugin);
   md.use(customItalicPlugin);
@@ -665,47 +743,51 @@ function makeMarkdownIt() {
   return md;
 }
 
-function compile(source) {
-  const md = makeMarkdownIt();
-  const { config, vars, tabs } = parseWmd(source);
-  const warnings = [];
-  const tabsBySlug = new Map(tabs.map(tab => [slugify(tab.name), tab]));
+function renderTab(md, tab, env) {
+  const tokens = md.parse(tab.resolvedContent, env);
+  applyHeadingIdsToTokens(tokens, tab.headings);
+  return md.renderer.render(tokens, md.options, env);
+}
 
-  for (const tab of tabs) {
-    const withIncludes = resolveIncludes(tab.content.join("\n"), tabsBySlug, warnings, tab.name);
-    tab.resolvedContent = applyVars(withIncludes, vars, warnings, tab.name);
-  }
-
-  for (const tab of tabs) {
-    tab.headings = collectHeadings(tab.resolvedContent, tab);
-  }
-
-  const allHeadings = tabs.flatMap(tab => tab.headings);
-  const visibleTabs = tabs.filter(tab => !tab.hidden);
-  const visibleHeadings = allHeadings.filter(heading => !heading.hidden);
+function buildHtml(config, tabs, warnings) {
+  const allHeadings = tabs.flatMap((tab) => tab.headings);
+  const visibleTabs = tabs.filter((tab) => !tab.hidden);
+  const visibleHeadings = allHeadings.filter((heading) => !heading.hidden);
   const firstActiveTab = visibleTabs[0] || tabs[0];
-  const firstActiveTabSlug = firstActiveTab ? slugify(firstActiveTab.name) : "";
+  const firstActiveTabId = firstActiveTab ? firstActiveTab.domId : "";
 
-  const tabSlugs = new Set(tabs.map(tab => slugify(tab.name)));
-  const headingIds = new Set(allHeadings.map(heading => heading.id));
+  const headingAnchors = new Map();
+  const tabAnchors = new Map();
+
+  tabs.forEach((tab) => {
+    if (!tabAnchors.has(tab.refSlug)) {
+      tabAnchors.set(tab.refSlug, tab.domId);
+    }
+  });
+
+  allHeadings.forEach((heading) => {
+    if (!headingAnchors.has(heading.anchorKey)) {
+      headingAnchors.set(heading.anchorKey, heading.id);
+    }
+  });
+
+  const md = makeMarkdownIt();
 
   const tabButtons = visibleTabs
-    .map(tab => {
-      const tabId = slugify(tab.name);
-      const active = tabId === firstActiveTabSlug ? "active" : "";
-
-      return `<button class="tab-button ${active}" type="button" data-tab-id="${escapeHtml(tabId)}">${escapeHtml(tab.name)}</button>`;
+    .map((tab) => {
+      const active = tab.domId === firstActiveTabId ? "active" : "";
+      return `<button class="tab-button ${active}" type="button" data-tab-id="${escapeHtml(tab.domId)}">${escapeHtml(tab.name)}</button>`;
     })
     .join("\n");
 
   const searchItems = visibleHeadings
-    .map(heading => {
+    .map((heading) => {
       return `
 <button
   class="heading-result heading-level-${heading.level}"
   type="button"
   data-search="${escapeHtml((heading.tabName + " " + heading.text).toLowerCase())}"
-  data-tab-id="${escapeHtml(heading.tabSlug)}"
+  data-tab-id="${escapeHtml(heading.tabDomId)}"
   data-heading-id="${escapeHtml(heading.id)}"
   data-level="${heading.level}"
 >
@@ -716,28 +798,23 @@ function compile(source) {
     .join("\n");
 
   const tabSections = tabs
-    .map(tab => {
-      const tabId = slugify(tab.name);
-      const active = tabId === firstActiveTabSlug ? "active" : "";
-      const hiddenClass = tab.hidden ? "hidden-tab" : "";
-      const rendered = addHeadingIds(
-        md.render(tab.resolvedContent, {
-          tabSlugs,
-          headingIds,
-          warnings,
-          currentTabName: tab.name,
-          currentTabSlug: tabId,
-          currentTabHeadings: tab.headings,
-        }),
-        tab.name
-      );
+    .map((tab) => {
+      const active = tab.domId === firstActiveTabId ? "active" : "";
+      const rendered = renderTab(md, tab, {
+        tabAnchors,
+        headingAnchors,
+        warnings,
+        currentTabName: tab.name,
+        currentTabSlug: tab.refSlug,
+        currentTabHeadings: tab.headings,
+      });
 
       const titleHtml = tab.title
         ? `<h1 class="tab-title">${escapeHtml(tab.title)}</h1>`
         : "";
 
       return `
-<section id="${tabId}" class="tab-section ${active} ${hiddenClass}" data-hidden="${tab.hidden ? "true" : "false"}">
+<section id="${escapeHtml(tab.domId)}" class="tab-section ${active}" data-hidden="${tab.hidden ? "true" : "false"}">
 ${titleHtml}
 ${rendered}
 </section>`;
@@ -749,7 +826,7 @@ ${rendered}
   const warningHtml = finalWarnings.length
     ? `<div class="warning-panel">
 <h3>Compiler warnings</h3>
-${finalWarnings.map(warning => `<p>${escapeHtml(warning)}</p>`).join("\n")}
+${finalWarnings.map((warning) => `<p>${escapeHtml(warning)}</p>`).join("\n")}
 </div>`
     : "";
 
@@ -757,6 +834,7 @@ ${finalWarnings.map(warning => `<p>${escapeHtml(warning)}</p>`).join("\n")}
 <html lang="en">
 <head>
 <meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>WMD Document</title>
 <style>
   :root {
@@ -771,6 +849,8 @@ ${finalWarnings.map(warning => `<p>${escapeHtml(warning)}</p>`).join("\n")}
     --muted: #666666;
     --warning-bg: #fff1c2;
     --warning-border: #d79b00;
+    --surface-soft: #f7f7f7;
+    --surface-raised: #fafafa;
 
     --font: ${config.font};
     --mono-font: ${config.monoFont};
@@ -798,6 +878,8 @@ ${finalWarnings.map(warning => `<p>${escapeHtml(warning)}</p>`).join("\n")}
     --muted: #aaaaaa;
     --warning-bg: #3a2d00;
     --warning-border: #d79b00;
+    --surface-soft: #1c1c1c;
+    --surface-raised: #181818;
   }
 
   body {
@@ -841,6 +923,8 @@ ${finalWarnings.map(warning => `<p>${escapeHtml(warning)}</p>`).join("\n")}
   }
 
   .dark-toggle {
+    width: 100%;
+    margin-top: 20px;
     padding: 9px;
     cursor: pointer;
     border: 1px solid var(--border);
@@ -936,11 +1020,6 @@ ${finalWarnings.map(warning => `<p>${escapeHtml(warning)}</p>`).join("\n")}
     display: block;
   }
 
-  .dark-toggle {
-    width: 100%;
-    margin-top: 20px;
-  }
-
   .warning-panel {
     margin-top: 20px;
     padding: 10px;
@@ -962,6 +1041,7 @@ ${finalWarnings.map(warning => `<p>${escapeHtml(warning)}</p>`).join("\n")}
   main {
     width: 100%;
     max-width: var(--content-width);
+    margin: 0 auto;
     padding: 40px;
     box-sizing: border-box;
   }
@@ -1045,7 +1125,7 @@ ${finalWarnings.map(warning => `<p>${escapeHtml(warning)}</p>`).join("\n")}
 
   .callout {
     border-left: 5px solid #888888;
-    background: color-mix(in srgb, var(--panel) 70%, var(--bg));
+    background: var(--surface-soft);
     padding: 0.9rem 1rem;
     margin: 1rem 0;
     border-radius: 8px;
@@ -1093,7 +1173,7 @@ ${finalWarnings.map(warning => `<p>${escapeHtml(warning)}</p>`).join("\n")}
     border: 1px solid var(--border);
     border-radius: 8px;
     margin: 1rem 0;
-    background: color-mix(in srgb, var(--panel) 55%, var(--bg));
+    background: var(--surface-raised);
   }
 
   .collapse summary {
@@ -1111,7 +1191,7 @@ ${finalWarnings.map(warning => `<p>${escapeHtml(warning)}</p>`).join("\n")}
     border-radius: 8px;
     padding: 1rem;
     margin: 1rem 0;
-    background: color-mix(in srgb, var(--panel) 55%, var(--bg));
+    background: var(--surface-raised);
   }
 
   .toc-title {
@@ -1161,6 +1241,24 @@ ${finalWarnings.map(warning => `<p>${escapeHtml(warning)}</p>`).join("\n")}
     display: none !important;
   }
 
+  @media (max-width: 900px) {
+    .layout {
+      display: block;
+    }
+
+    .sidebar {
+      width: auto;
+      height: auto;
+      position: static;
+      border-right: none;
+      border-bottom: 2px solid var(--border);
+    }
+
+    main {
+      max-width: none;
+      padding: 24px 18px 40px;
+    }
+  }
 </style>
 </head>
 <body>
@@ -1174,6 +1272,7 @@ ${finalWarnings.map(warning => `<p>${escapeHtml(warning)}</p>`).join("\n")}
     <input
       class="search-box"
       id="headingSearch"
+      type="search"
       placeholder="Search headings..."
     >
 
@@ -1225,7 +1324,7 @@ ${finalWarnings.map(warning => `<p>${escapeHtml(warning)}</p>`).join("\n")}
 
         var marker = node.querySelector(".heading-collapse-marker");
         var collapsed = node.dataset.collapsed === "true";
-        if (marker) marker.textContent = collapsed ? "▸" : "▾";
+        if (marker) marker.textContent = collapsed ? ">" : "v";
 
         stack.push({ level: level, collapsed: collapsed || hiddenByParent });
         return;
@@ -1249,7 +1348,7 @@ ${finalWarnings.map(warning => `<p>${escapeHtml(warning)}</p>`).join("\n")}
 
       var marker = document.createElement("span");
       marker.className = "heading-collapse-marker";
-      marker.textContent = "▾";
+      marker.textContent = "v";
       marker.setAttribute("aria-hidden", "true");
       heading.insertBefore(marker, heading.firstChild);
 
@@ -1344,7 +1443,7 @@ ${finalWarnings.map(warning => `<p>${escapeHtml(warning)}</p>`).join("\n")}
       var heading = document.getElementById(headingId);
       if (heading) {
         expandAncestorsForHeading(heading);
-        heading.scrollIntoView();
+        heading.scrollIntoView({ block: "start" });
       }
     }, 0);
   }
@@ -1362,7 +1461,7 @@ ${finalWarnings.map(warning => `<p>${escapeHtml(warning)}</p>`).join("\n")}
     var hash = location.hash.slice(1);
 
     if (!hash) {
-      openTab(${JSON.stringify(firstActiveTabSlug)}, false);
+      openTab(${JSON.stringify(firstActiveTabId)}, false);
       return;
     }
 
@@ -1372,10 +1471,9 @@ ${finalWarnings.map(warning => `<p>${escapeHtml(warning)}</p>`).join("\n")}
       return;
     }
 
-    var matchingTab = Array.from(document.querySelectorAll(".tab-section"))
-      .find(function(section) {
-        return hash.startsWith(section.id + "-");
-      });
+    var matchingTab = Array.from(document.querySelectorAll(".tab-section")).find(function(section) {
+      return hash.startsWith(section.id + "-");
+    });
 
     if (matchingTab) {
       openTab(matchingTab.id, false);
@@ -1384,10 +1482,13 @@ ${finalWarnings.map(warning => `<p>${escapeHtml(warning)}</p>`).join("\n")}
         var target = document.getElementById(hash);
         if (target) {
           expandAncestorsForHeading(target);
-          target.scrollIntoView();
+          target.scrollIntoView({ block: "start" });
         }
       }, 0);
+      return;
     }
+
+    openTab(${JSON.stringify(firstActiveTabId)}, false);
   }
 
   if (localStorage.getItem("darkMode") === "true") {
@@ -1430,16 +1531,424 @@ ${finalWarnings.map(warning => `<p>${escapeHtml(warning)}</p>`).join("\n")}
   return { html, warnings: finalWarnings };
 }
 
-const source = fs.readFileSync(inputPath, "utf8");
-const result = compile(source);
+function compile(source) {
+  const md = makeMarkdownIt();
+  const { config, vars, tabs } = parseWmd(source);
+  const warnings = [];
+  const tabsBySlug = finalizeTabs(tabs, warnings);
 
-fs.writeFileSync(outputPath, result.html);
-
-console.log(`Compiled ${inputPath} → ${outputPath}`);
-
-if (result.warnings.length) {
-  console.log("\nWMD warnings:");
-  for (const warning of result.warnings) {
-    console.log(`- ${warning}`);
+  for (const tab of tabs) {
+    const withIncludes = resolveIncludes(tab.content.join("\n"), tabsBySlug, warnings, tab.name);
+    tab.resolvedContent = applyVars(withIncludes, vars, warnings, tab.name);
   }
+
+  for (const tab of tabs) {
+    tab.headings = collectHeadings(md, tab);
+  }
+
+  return buildHtml(config, tabs, warnings);
+}
+
+function ensureParentDirectory(filePath) {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+}
+
+function compileFile(inputPath, outputPath) {
+  const resolvedInput = path.resolve(inputPath);
+  const resolvedOutput = path.resolve(outputPath);
+  const source = fs.readFileSync(resolvedInput, "utf8");
+  const result = compile(source);
+
+  ensureParentDirectory(resolvedOutput);
+  fs.writeFileSync(resolvedOutput, result.html, "utf8");
+
+  return result;
+}
+
+function injectLiveReload(html, liveReloadPath) {
+  const snippet = `
+<script>
+  (function() {
+    if (!window.EventSource || location.protocol.indexOf("http") !== 0) return;
+
+    var source = new EventSource(${JSON.stringify(liveReloadPath)});
+    source.addEventListener("reload", function() {
+      location.reload();
+    });
+  })();
+</script>`;
+
+  if (html.includes("</body>")) {
+    return html.replace("</body>", `${snippet}\n</body>`);
+  }
+
+  return `${html}\n${snippet}`;
+}
+
+function createErrorPage(inputPath, error) {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>WMD Compile Error</title>
+<style>
+  body {
+    margin: 0;
+    padding: 24px;
+    background: #121212;
+    color: #eeeeee;
+    font-family: Consolas, monospace;
+  }
+
+  h1 {
+    margin-top: 0;
+    font-family: Arial, sans-serif;
+  }
+
+  pre {
+    white-space: pre-wrap;
+    word-break: break-word;
+    background: #1d1d1d;
+    padding: 16px;
+    border-radius: 8px;
+    border: 1px solid #333333;
+  }
+</style>
+</head>
+<body>
+  <h1>WMD compile error</h1>
+  <p>${escapeHtml(formatPathForLog(inputPath))}</p>
+  <pre>${escapeHtml(error && error.stack ? error.stack : String(error))}</pre>
+</body>
+</html>`;
+}
+
+function watchFile(options) {
+  const {
+    inputPath,
+    outputPath,
+    onSuccess,
+    onError,
+  } = options;
+
+  const resolvedInput = path.resolve(inputPath);
+  const resolvedOutput = path.resolve(outputPath);
+  const watchDirectory = path.dirname(resolvedInput);
+  const watchedFileName = path.basename(resolvedInput);
+  let timer = null;
+  let closed = false;
+
+  const triggerCompile = () => {
+    if (closed) return;
+
+    try {
+      const result = compileFile(resolvedInput, resolvedOutput);
+      if (onSuccess) onSuccess(result);
+    } catch (error) {
+      if (onError) onError(error);
+    }
+  };
+
+  const watcher = fs.watch(watchDirectory, (eventType, fileName) => {
+    const changedName = fileName ? path.basename(String(fileName)) : watchedFileName;
+    if (changedName !== watchedFileName) return;
+
+    clearTimeout(timer);
+    timer = setTimeout(triggerCompile, WATCH_DEBOUNCE_MS);
+  });
+
+  return () => {
+    closed = true;
+    clearTimeout(timer);
+    watcher.close();
+  };
+}
+
+function startPreviewServer(options) {
+  const {
+    inputPath,
+    outputPath,
+    port = DEFAULT_PORT,
+  } = options;
+
+  const liveReloadPath = "/__wmd/live";
+  const clients = new Set();
+  let currentHtml = "";
+  let lastError = null;
+
+  const refreshClients = () => {
+    for (const client of clients) {
+      client.write("event: reload\ndata: ok\n\n");
+    }
+  };
+
+  const handleSuccess = (result) => {
+    currentHtml = result.html;
+    lastError = null;
+    reportCompile(result, inputPath, outputPath);
+    refreshClients();
+  };
+
+  const handleError = (error) => {
+    currentHtml = createErrorPage(inputPath, error);
+    lastError = error;
+    reportCompileError(error, inputPath);
+    refreshClients();
+  };
+
+  try {
+    const result = compileFile(inputPath, outputPath);
+    currentHtml = result.html;
+    reportCompile(result, inputPath, outputPath);
+  } catch (error) {
+    handleError(error);
+  }
+
+  const stopWatching = watchFile({
+    inputPath,
+    outputPath,
+    onSuccess: handleSuccess,
+    onError: handleError,
+  });
+
+  const server = http.createServer((request, response) => {
+    const urlPath = request.url || "/";
+
+    if (urlPath === liveReloadPath) {
+      response.writeHead(200, {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache, no-store, must-revalidate",
+        Connection: "keep-alive",
+      });
+
+      response.write("retry: 500\n\n");
+      clients.add(response);
+
+      request.on("close", () => {
+        clients.delete(response);
+      });
+
+      return;
+    }
+
+    if (urlPath === "/" || urlPath === `/${path.basename(outputPath)}`) {
+      response.writeHead(200, {
+        "Content-Type": "text/html; charset=utf-8",
+        "Cache-Control": "no-cache, no-store, must-revalidate",
+      });
+
+      const html = injectLiveReload(currentHtml || createErrorPage(inputPath, lastError || new Error("No output available")), liveReloadPath);
+      response.end(html);
+      return;
+    }
+
+    response.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
+    response.end("Not found");
+  });
+
+  server.listen(port, "127.0.0.1", () => {
+    console.log(`Preview server running at http://127.0.0.1:${port}`);
+    console.log(`Watching ${formatPathForLog(inputPath)} -> ${formatPathForLog(outputPath)}`);
+  });
+
+  return {
+    close() {
+      stopWatching();
+
+      for (const client of clients) {
+        client.end();
+      }
+
+      server.close();
+    },
+    server,
+  };
+}
+
+function formatPathForLog(filePath) {
+  const relative = path.relative(process.cwd(), path.resolve(filePath));
+  return relative || path.resolve(filePath);
+}
+
+function reportCompile(result, inputPath, outputPath) {
+  console.log(`Compiled ${formatPathForLog(inputPath)} -> ${formatPathForLog(outputPath)}`);
+
+  if (result.warnings.length) {
+    for (const warning of result.warnings) {
+      console.warn(`warning ${formatPathForLog(inputPath)}: ${warning}`);
+    }
+  }
+}
+
+function reportCompileError(error, inputPath) {
+  const message = error && error.message ? error.message : String(error);
+  console.error(`error ${formatPathForLog(inputPath)}: ${message}`);
+}
+
+function printHelp() {
+  console.log(`WMD compiler
+
+Usage:
+  node wmd-compiler.js [input] [output]
+  node wmd-compiler.js --watch [input] [output]
+  node wmd-compiler.js --serve [input] [output] [--port 4312]
+
+Options:
+  --input, -i   Input .wmd file (default: ${DEFAULT_INPUT_PATH})
+  --output, -o  Output HTML file (default: ${DEFAULT_OUTPUT_PATH})
+  --watch, -w   Recompile when the input file changes
+  --serve, -s   Start a local preview server with live reload
+  --port, -p    Preview server port (default: ${DEFAULT_PORT})
+  --help, -h    Show this help text`);
+}
+
+function parseArgs(argv) {
+  const options = {
+    inputPath: DEFAULT_INPUT_PATH,
+    outputPath: DEFAULT_OUTPUT_PATH,
+    watch: false,
+    serve: false,
+    port: DEFAULT_PORT,
+    help: false,
+  };
+
+  const positional = [];
+
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+
+    if (arg === "--help" || arg === "-h") {
+      options.help = true;
+      continue;
+    }
+
+    if (arg === "--watch" || arg === "-w") {
+      options.watch = true;
+      continue;
+    }
+
+    if (arg === "--serve" || arg === "-s") {
+      options.serve = true;
+      options.watch = true;
+      continue;
+    }
+
+    if (arg === "--input" || arg === "-i") {
+      i += 1;
+      if (i >= argv.length) throw new Error("Missing value for --input.");
+      options.inputPath = argv[i];
+      continue;
+    }
+
+    if (arg === "--output" || arg === "-o") {
+      i += 1;
+      if (i >= argv.length) throw new Error("Missing value for --output.");
+      options.outputPath = argv[i];
+      continue;
+    }
+
+    if (arg === "--port" || arg === "-p") {
+      i += 1;
+      if (i >= argv.length) throw new Error("Missing value for --port.");
+
+      const port = Number(argv[i]);
+      if (!Number.isInteger(port) || port <= 0) {
+        throw new Error(`Invalid port: ${argv[i]}`);
+      }
+
+      options.port = port;
+      continue;
+    }
+
+    if (arg.startsWith("-")) {
+      throw new Error(`Unknown option: ${arg}`);
+    }
+
+    positional.push(arg);
+  }
+
+  if (positional[0]) {
+    options.inputPath = positional[0];
+  }
+
+  if (positional[1]) {
+    options.outputPath = positional[1];
+  }
+
+  if (positional.length > 2) {
+    throw new Error("Too many positional arguments.");
+  }
+
+  return options;
+}
+
+function runCli(argv = process.argv.slice(2)) {
+  let options;
+
+  try {
+    options = parseArgs(argv);
+  } catch (error) {
+    reportCompileError(error, DEFAULT_INPUT_PATH);
+    process.exitCode = 1;
+    return;
+  }
+
+  if (options.help) {
+    printHelp();
+    return;
+  }
+
+  if (options.serve) {
+    startPreviewServer({
+      inputPath: options.inputPath,
+      outputPath: options.outputPath,
+      port: options.port,
+    });
+    return;
+  }
+
+  try {
+    const result = compileFile(options.inputPath, options.outputPath);
+    reportCompile(result, options.inputPath, options.outputPath);
+  } catch (error) {
+    reportCompileError(error, options.inputPath);
+    process.exitCode = 1;
+
+    if (!options.watch) {
+      return;
+    }
+  }
+
+  if (!options.watch) {
+    return;
+  }
+
+  watchFile({
+    inputPath: options.inputPath,
+    outputPath: options.outputPath,
+    onSuccess: (result) => {
+      reportCompile(result, options.inputPath, options.outputPath);
+    },
+    onError: (error) => {
+      reportCompileError(error, options.inputPath);
+    },
+  });
+
+  console.log(`Watching ${formatPathForLog(options.inputPath)} -> ${formatPathForLog(options.outputPath)}`);
+}
+
+module.exports = {
+  DEFAULT_INPUT_PATH,
+  DEFAULT_OUTPUT_PATH,
+  DEFAULT_PORT,
+  compile,
+  compileFile,
+  parseArgs,
+  startPreviewServer,
+  watchFile,
+};
+
+if (require.main === module) {
+  runCli();
 }
