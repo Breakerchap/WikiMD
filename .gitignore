@@ -3,6 +3,9 @@ node_modules/
 # Generated previews and compiled output
 *.html
 
+# Local documents created by the web editor
+web/data/
+
 # Local editor/system noise
 .DS_Store
 Thumbs.db

@@ -7,6 +7,9 @@
     "watch": "node ./wmd-compiler.js --watch",
     "serve": "node ./wmd-compiler.js --serve",
     "dev": "node ./wmd-compiler.js --serve --watch",
+    "web": "node ./web/server.js",
+    "web:dev": "node ./web/server.js",
+    "web:lan": "node ./web/server.js --host 0.0.0.0",
     "test": "node --test"
   },
   "keywords": [],

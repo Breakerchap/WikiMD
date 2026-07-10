@@ -28,6 +28,21 @@ node wmd-compiler.js --serve
 node --test
 ```
 
+## Web editor branch
+
+The `web-editor` branch adds a local, collaborative browser editor without changing the normal compiler workflow on `main`.
+
+```bash
+git switch web-editor
+node web/server.js
+```
+
+Then open `http://127.0.0.1:4313`. The editor has a persistent formatting bar, WMD source editing, `Ctrl+B` / `Ctrl+I` shortcuts, live compiled previews, MD and DOCX import, and `.wmd` downloads. Share the page URL, for example `http://127.0.0.1:4313/?doc=team-notes`, with another browser on the same server to collaborate in real time.
+
+Saved browser documents live in `web/data/`, which is intentionally ignored by Git.
+
+For collaborators on your local network, start the server with `node web/server.js --host 0.0.0.0` (or `npm run web:lan`) and share your computer's LAN address, such as `http://192.168.1.20:4313/?doc=team-notes`. This editor intentionally has no sign-in system yet, so only use LAN mode on a network you trust.
+
 You can also point the compiler at another file:
 
 ```bash
