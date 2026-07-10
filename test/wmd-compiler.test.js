@@ -80,10 +80,28 @@ test("double plus markers compile to persistent underline", () => {
   assert.match(result.html, /<u>Important<\/u>/);
 });
 
+test("callout types retain their compiled style classes", () => {
+  const result = compile("@tab Home\n!warning Check this\nImportant detail\n!end");
+
+  assert.match(result.html, /class="callout callout-warning"/);
+  assert.match(result.html, /<div class="callout-title">Check this<\/div>/);
+});
+
 test("single WMD newlines render as document line breaks", () => {
   const result = compile("@tab Home\nFirst line\nSecond line");
 
   assert.match(result.html, /First line<br>\s*Second line/);
+});
+
+test("WMD tables compile to semantic table markup", () => {
+  const result = compile(`@tab Home
+| Name | Score |
+| --- | --- |
+| Ada | 10 |`);
+
+  assert.match(result.html, /<table>/);
+  assert.match(result.html, /<th>Name<\/th>/);
+  assert.match(result.html, /<td>Ada<\/td>/);
 });
 
 test("web server options support LAN and a public editor URL", () => {

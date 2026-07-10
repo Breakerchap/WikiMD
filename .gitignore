@@ -12,3 +12,5 @@ web/data/
 # Local editor/system noise
 .DS_Store
 Thumbs.db
+
+issues.wmd

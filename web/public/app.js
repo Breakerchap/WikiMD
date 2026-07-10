@@ -4,6 +4,7 @@
   const SETTINGS_KEY = "wmd-studio-settings-v4";
   const DRAFT_PREFIX = "wmd-studio-draft-v2:";
   const COLORS = ["#3f7f6b", "#b75b4a", "#486f9b", "#a47732", "#765899"];
+  const CALLOUT_TYPES = ["note", "tip", "info", "warning", "danger", "rule", "example"];
 
   const editor = document.querySelector("#editor");
   const highlightLayer = document.querySelector("#wmdHighlight");
@@ -26,6 +27,20 @@
   const panelsButton = document.querySelector("#panelsButton");
   const settingsDialog = document.querySelector("#settingsDialog");
   const settingsForm = document.querySelector("#settingsForm");
+  const insertDialog = document.querySelector("#insertDialog");
+  const insertForm = document.querySelector("#insertForm");
+  const insertFields = document.querySelector("#insertFields");
+  const insertDialogTitle = document.querySelector("#insertDialogTitle");
+  const insertDialogDescription = document.querySelector("#insertDialogDescription");
+  const confirmInsertButton = document.querySelector("#confirmInsertButton");
+  const renameDialog = document.querySelector("#renameDialog");
+  const renameForm = document.querySelector("#renameForm");
+  const renameInput = document.querySelector("#renameInput");
+  const findDialog = document.querySelector("#findDialog");
+  const findForm = document.querySelector("#findForm");
+  const findInput = document.querySelector("#findInput");
+  const replaceInput = document.querySelector("#replaceInput");
+  const findStatus = document.querySelector("#findStatus");
   const macroList = document.querySelector("#macroList");
   const importInput = document.querySelector("#importInput");
   const documentModeButton = document.querySelector("#documentModeButton");
@@ -66,6 +81,8 @@
     dragging: null,
     shuttingDown: false,
     importedSource: null,
+    pendingInsert: null,
+    findMatch: null,
   };
 
   function createId() {
@@ -335,6 +352,7 @@
     sizeIndicator.textContent = String(baseSize);
     zoomControl.textContent = `${settings.zoom}%`;
     fontControl.value = [...fontControl.options].some((option) => option.value === font) ? font : "Arial, sans-serif";
+    fontControl.style.fontFamily = fontControl.value;
   }
 
   function configValue(name, fallback) {
@@ -386,9 +404,103 @@
   }
 
   function updateIdentity() {
-    const title = state.source.match(/^@title\s+(.+)$/m);
-    documentName.textContent = title ? title[1].trim() : state.documentId.replace(/[-_]+/g, " ");
+    documentName.textContent = documentTitle();
     document.title = `${documentName.textContent} | WMD Studio`;
+  }
+
+  function documentTitle() {
+    const title = state.source.match(/^@title\s+(.+)$/m);
+    return title ? title[1].trim() : state.documentId.replace(/[-_]+/g, " ");
+  }
+
+  function openRenameDialog() {
+    renameInput.value = documentTitle();
+    renameDialog.showModal();
+    requestAnimationFrame(() => {
+      renameInput.focus();
+      renameInput.select();
+    });
+  }
+
+  function renameDocument(title) {
+    const nextTitle = String(title || "").trim().replace(/[\r\n]+/g, " ");
+    if (!nextTitle) return;
+    const titlePattern = /^@title\s+.*$/m;
+    let nextSource;
+    if (titlePattern.test(state.source)) nextSource = state.source.replace(titlePattern, `@title ${nextTitle}`);
+    else if (/^@tab\s+.+$/m.test(state.source)) nextSource = state.source.replace(/^@tab\s+.+$/m, (tab) => `${tab}\n@title ${nextTitle}`);
+    else nextSource = `@title ${nextTitle}\n\n${state.source}`;
+    changeSource(nextSource, { compile: true });
+    toastMessage("Document renamed.");
+  }
+
+  function openFindDialog() {
+    const selected = state.mode === "wmd" ? editor.value.slice(editor.selectionStart, editor.selectionEnd) : "";
+    if (selected) findInput.value = selected;
+    findStatus.textContent = "Searches the WMD source so replacements are safe and shared.";
+    findDialog.showModal();
+    requestAnimationFrame(() => findInput.focus());
+  }
+
+  function selectFindMatch(start, end) {
+    setMode("wmd", true);
+    requestAnimationFrame(() => {
+      editor.setSelectionRange(start, end);
+      const line = state.source.slice(0, start).split("\n").length - 1;
+      const lineHeight = Number.parseFloat(getComputedStyle(editor).lineHeight) || 23;
+      editor.scrollTop = Math.max(0, line * lineHeight - editor.clientHeight / 2);
+      editor.focus();
+      scheduleRawSelection();
+    });
+  }
+
+  function findNext() {
+    const query = findInput.value;
+    if (!query) return;
+    const prior = state.findMatch && state.findMatch.query === query ? state.findMatch.index + 1 : 0;
+    let index = state.source.indexOf(query, prior);
+    let wrapped = false;
+    if (index === -1 && prior > 0) {
+      index = state.source.indexOf(query);
+      wrapped = index !== -1;
+    }
+    if (index === -1) {
+      state.findMatch = null;
+      findStatus.textContent = `No matches for "${query}".`;
+      return;
+    }
+    state.findMatch = { query, index };
+    findStatus.textContent = wrapped ? "Found a match from the start of the document." : "Match found.";
+    selectFindMatch(index, index + query.length);
+  }
+
+  function replaceCurrentMatch() {
+    const query = findInput.value;
+    if (!query) return;
+    const match = state.findMatch && state.findMatch.query === query ? state.findMatch : null;
+    if (!match) {
+      findNext();
+      return;
+    }
+    const replacement = replaceInput.value;
+    const next = `${state.source.slice(0, match.index)}${replacement}${state.source.slice(match.index + query.length)}`;
+    state.findMatch = { query, index: match.index + replacement.length - 1 };
+    changeSource(next, { compile: true, keepEditor: true });
+    findStatus.textContent = "Replaced one match.";
+    findNext();
+  }
+
+  function replaceAllMatches() {
+    const query = findInput.value;
+    if (!query) return;
+    const count = state.source.split(query).length - 1;
+    if (!count) {
+      findStatus.textContent = `No matches for "${query}".`;
+      return;
+    }
+    changeSource(state.source.split(query).join(replaceInput.value), { compile: true, keepEditor: true });
+    state.findMatch = null;
+    findStatus.textContent = `Replaced ${count} match${count === 1 ? "" : "es"}.`;
   }
 
   function updateWordCount() {
@@ -776,10 +888,11 @@
   main { max-width: min(980px, calc(100vw - 48px)); margin: 0 auto; padding: 42px 0 80px; }
   .wmd-studio-duplicate-title { display: none !important; }
   main.wmd-studio-editable { min-height: calc(100vh - 32px); outline: none; cursor: text; }
-  main.wmd-studio-editable:focus { box-shadow: inset 3px 0 0 #d69a3e; }
   .wmd-studio-tabs { position: sticky; top: 0; z-index: 5; display: flex; gap: 7px; padding: 12px max(24px, calc((100vw - 980px) / 2)); overflow-x: auto; background: color-mix(in srgb, var(--panel) 92%, transparent); border-bottom: 1px solid var(--border); }
   .wmd-studio-tabs button { border: 1px solid var(--border); border-radius: 7px; padding: 6px 10px; color: var(--text); background: var(--bg); font: 700 12px system-ui, sans-serif; cursor: pointer; white-space: nowrap; }
   .wmd-studio-tabs button.active { color: var(--panel-active-text); background: var(--panel-active); border-color: var(--panel-active); }
+  .wmd-studio-heading-toggle { width: 1.45em; margin: 0 0.18em 0 0; padding: 0; border: 0; color: var(--muted); background: transparent; font: inherit; line-height: 1; cursor: pointer; vertical-align: baseline; }
+  .wmd-studio-heading-toggle:hover, .wmd-studio-heading-toggle:focus-visible { color: var(--text); }
   .wmd-studio-cursor { display:inline-block;width:2px;height:1.25em;margin:-0.1em 0;vertical-align:text-bottom;background:var(--wmd-cursor,#b9483c);position:relative;pointer-events:none; }
   .wmd-studio-cursor::after { content:attr(data-name);position:absolute;left:-2px;bottom:100%;padding:2px 5px;border-radius:4px;color:white;background:var(--wmd-cursor,#b9483c);font:700 10px sans-serif;white-space:nowrap; }
 </style>
@@ -793,8 +906,6 @@
   main.contentEditable = 'true';
   main.spellcheck = true;
   main.classList.add('wmd-studio-editable');
-  document.querySelectorAll('.heading-collapse-marker').forEach(function(marker) { marker.remove(); });
-  document.querySelectorAll('.collapsible-heading').forEach(function(heading) { heading.classList.remove('collapsible-heading'); });
   document.querySelectorAll('.tab-title').forEach(function(title) {
     var duplicate = title.nextElementSibling;
     if (duplicate && duplicate.tagName === 'H1' && duplicate.textContent.trim() === title.textContent.trim()) {
@@ -828,6 +939,60 @@
     });
   }
   refreshTabBar();
+
+  function updateEditableHeadingVisibility(section) {
+    if (!section) return;
+    var stack = [];
+    Array.prototype.slice.call(section.children).forEach(function(node) {
+      if (/^H[1-6]$/.test(node.tagName) && !node.classList.contains('tab-title')) {
+        var level = Number(node.tagName.slice(1));
+        stack = stack.filter(function(item) { return item.level < level; });
+        var hiddenByParent = stack.some(function(item) { return item.collapsed; });
+        node.classList.toggle('heading-hidden-by-collapse', hiddenByParent);
+        var collapsed = node.dataset.collapsed === 'true';
+        var toggle = node.querySelector('.wmd-studio-heading-toggle');
+        if (toggle) {
+          toggle.textContent = collapsed ? '>' : 'v';
+          toggle.setAttribute('aria-label', collapsed ? 'Expand section' : 'Collapse section');
+        }
+        stack.push({ level: level, collapsed: collapsed || hiddenByParent });
+        return;
+      }
+      node.classList.toggle('heading-hidden-by-collapse', stack.some(function(item) { return item.collapsed; }));
+    });
+  }
+
+  function setupEditableHeadingCollapses() {
+    var sections = Array.prototype.slice.call(main.querySelectorAll(':scope > section.tab-section'));
+    sections.forEach(function(section) {
+      Array.prototype.slice.call(section.children).filter(function(node) {
+        return /^H[1-6]$/.test(node.tagName) && !node.classList.contains('tab-title');
+      }).forEach(function(heading) {
+        // Cloning removes the compiler's whole-heading click listener so heading text stays editable.
+        var editableHeading = heading.cloneNode(true);
+        heading.replaceWith(editableHeading);
+        editableHeading.classList.remove('collapsible-heading');
+        editableHeading.dataset.collapsed = 'false';
+        editableHeading.querySelectorAll('.heading-collapse-marker, .wmd-studio-heading-toggle').forEach(function(marker) { marker.remove(); });
+        var toggle = document.createElement('button');
+        toggle.type = 'button';
+        toggle.className = 'heading-collapse-marker wmd-studio-heading-toggle';
+        toggle.contentEditable = 'false';
+        toggle.textContent = 'v';
+        toggle.setAttribute('aria-label', 'Collapse section');
+        toggle.addEventListener('pointerdown', function(event) { event.preventDefault(); });
+        toggle.addEventListener('click', function(event) {
+          event.preventDefault();
+          event.stopPropagation();
+          editableHeading.dataset.collapsed = editableHeading.dataset.collapsed === 'true' ? 'false' : 'true';
+          updateEditableHeadingVisibility(section);
+        });
+        editableHeading.insertBefore(toggle, editableHeading.firstChild);
+      });
+      updateEditableHeadingVisibility(section);
+    });
+  }
+  setupEditableHeadingCollapses();
 
   function post(type, payload) {
     var message = payload || {};
@@ -930,13 +1095,49 @@
     } catch (_) {}
   }
 
+  function tableSize(value, fallback) {
+    var size = Number.parseInt(value, 10);
+    return Number.isFinite(size) ? Math.max(1, Math.min(20, size)) : fallback;
+  }
+
+  function tableHtml(value) {
+    var rows = tableSize(value && value.rows, 3);
+    var columns = tableSize(value && value.columns, 3);
+    var headers = Array.from({ length: columns }, function(_, index) { return '<th>Header ' + (index + 1) + '</th>'; }).join('');
+    var bodyRows = Array.from({ length: Math.max(0, rows - 1) }, function() {
+      return '<tr>' + Array.from({ length: columns }, function() { return '<td><br></td>'; }).join('') + '</tr>';
+    }).join('');
+    return '<table><thead><tr>' + headers + '</tr></thead><tbody>' + bodyRows + '</tbody></table><p><br></p>';
+  }
+
+  function calloutHtml(value) {
+    var type = String(value || 'note').toLowerCase();
+    if (['note', 'tip', 'info', 'warning', 'danger', 'rule', 'example'].indexOf(type) === -1) type = 'note';
+    var title = type.charAt(0).toUpperCase() + type.slice(1);
+    return '<div class="callout callout-' + type + '"><div class="callout-title">' + title + '</div><div class="callout-body"><p>Write the ' + type + ' here.</p></div></div><p><br></p>';
+  }
+
   function command(data) {
     main.focus();
     if (data.command === 'insert') {
-      if (data.kind === 'link') document.execCommand('createLink', false, data.value || 'https://example.com');
-      if (data.kind === 'image') document.execCommand('insertImage', false, data.value || '');
+      if (data.kind === 'link') {
+        var href = data.value && data.value.href ? data.value.href : data.value;
+        document.execCommand('createLink', false, href || 'https://example.com');
+      }
+      if (data.kind === 'image') {
+        var imageValue = data.value || {};
+        var source = imageValue.src || imageValue;
+        if (source) {
+          var image = document.createElement('img');
+          image.src = source;
+          image.alt = imageValue.alt || '';
+          document.execCommand('insertHTML', false, image.outerHTML);
+        }
+      }
       if (data.kind === 'list') document.execCommand('insertUnorderedList');
-      if (data.kind === 'callout') document.execCommand('insertHTML', false, '<div class="callout callout-note"><div class="callout-title">A helpful note</div><div class="callout-body"><p>Write the note here.</p></div></div><p><br></p>');
+      if (data.kind === 'ordered-list') document.execCommand('insertOrderedList');
+      if (data.kind === 'table') document.execCommand('insertHTML', false, tableHtml(data.value));
+      if (data.kind === 'callout') document.execCommand('insertHTML', false, calloutHtml(data.value));
       if (data.kind === 'tab') {
         main.querySelectorAll(':scope > section.tab-section').forEach(function(candidate) { candidate.classList.remove('active'); });
         var section = document.createElement('section');
@@ -993,6 +1194,7 @@
     }
     if (!(event.ctrlKey || event.metaKey)) return;
     var key = event.key.toLowerCase();
+    if (key === 'h') { event.preventDefault(); post('request-find', {}); return; }
     if (key === 'b') { event.preventDefault(); command({ command: 'bold' }); }
     if (key === 'i') { event.preventDefault(); command({ command: 'italic' }); }
     if (key === 'u') { event.preventDefault(); command({ command: 'underline' }); }
@@ -1072,12 +1274,27 @@
         .join("\n");
     }
     if (element.tagName === "PRE") return `\`\`\`\n${element.textContent.replace(/\n$/, "")}\n\`\`\``;
+    if (element.tagName === "TABLE") return serializeCanvasTable(element);
     if (element.tagName === "HR") return "---";
     if (element.tagName === "DIV") {
       const children = [...element.children].filter((child) => /^(P|DIV|H[1-6]|UL|OL|BLOCKQUOTE|PRE|DETAILS)$/.test(child.tagName));
       return children.length ? children.map(serializeCanvasBlock).filter(Boolean).join("\n\n") : serializeCanvasInline(element);
     }
     return serializeCanvasInline(element);
+  }
+
+  function serializeCanvasTable(table) {
+    const rows = [...table.rows].map((row) => [...row.cells].map((cell) => serializeCanvasInline(cell)
+      .replace(/\r?\n/g, " ")
+      .replace(/\|/g, "\\|")
+      .trim()));
+    if (!rows.length) return "";
+    const columns = Math.max(1, ...rows.map((row) => row.length));
+    const normalize = (row) => Array.from({ length: columns }, (_, index) => row[index] || "");
+    const header = normalize(rows[0]).map((cell, index) => cell || `Column ${index + 1}`);
+    const divider = Array.from({ length: columns }, () => "---");
+    const body = rows.slice(1).map((row) => `| ${normalize(row).join(" | ")} |`);
+    return [`| ${header.join(" | ")} |`, `| ${divider.join(" | ")} |`, ...body].join("\n");
   }
 
   function serializeCanvasInline(node) {
@@ -1236,13 +1453,167 @@
     editor.focus();
   }
 
-  function insertRaw(kind) {
+  function addInsertField(labelText, name, options = {}) {
+    const label = document.createElement("label");
+    label.textContent = labelText;
+    const control = document.createElement(options.tagName || "input");
+    control.name = name;
+    control.id = `insert-${name}`;
+    if (options.type) control.type = options.type;
+    if (options.placeholder) control.placeholder = options.placeholder;
+    if (options.value !== undefined) control.value = options.value;
+    if (options.min !== undefined) control.min = String(options.min);
+    if (options.max !== undefined) control.max = String(options.max);
+    if (options.required) control.required = true;
+    if (options.options) {
+      options.options.forEach((option) => {
+        const entry = document.createElement("option");
+        entry.value = option.value;
+        entry.textContent = option.label;
+        control.append(entry);
+      });
+    }
+    label.append(control);
+    return { label, control };
+  }
+
+  function openInsertDialog(kind) {
+    state.pendingInsert = {
+      kind,
+      rawSelection: state.mode === "wmd" ? captureRawSelection() : null,
+      canvasSelection: state.mode === "document" && state.canvasSelection ? { ...state.canvasSelection } : null,
+    };
+    insertFields.replaceChildren();
+    const options = {
+      link: { title: "Insert link", description: "Add a link without leaving the editor." },
+      image: { title: "Insert image", description: "Use a public image URL and optional alt text." },
+      table: { title: "Insert table", description: "Choose the visible dimensions. The first row is the header." },
+      callout: { title: "Insert callout", description: "Choose the style of the note you want to add." },
+    }[kind];
+    if (!options) return;
+    insertDialogTitle.textContent = options.title;
+    insertDialogDescription.textContent = options.description;
+    confirmInsertButton.textContent = kind === "table" ? "Create table" : "Insert";
+
+    if (kind === "link") {
+      insertFields.append(addInsertField("Link address", "href", { type: "url", placeholder: "https://example.com", value: "https://", required: true }).label);
+      insertFields.append(addInsertField("Link text", "label", { placeholder: "Link text" }).label);
+    } else if (kind === "image") {
+      insertFields.append(addInsertField("Image address", "src", { type: "url", placeholder: "https://example.com/image.png", value: "https://", required: true }).label);
+      insertFields.append(addInsertField("Description", "alt", { placeholder: "Describe this image" }).label);
+    } else if (kind === "table") {
+      const dimensions = document.createElement("div");
+      dimensions.className = "dimension-grid";
+      dimensions.append(addInsertField("Rows", "rows", { type: "number", value: "3", min: 1, max: 20, required: true }).label);
+      dimensions.append(addInsertField("Columns", "columns", { type: "number", value: "3", min: 1, max: 20, required: true }).label);
+      insertFields.append(dimensions);
+    } else if (kind === "callout") {
+      insertFields.append(addInsertField("Callout type", "type", {
+        tagName: "select",
+        options: CALLOUT_TYPES.map((type) => ({ value: type, label: calloutLabel(type) })),
+      }).label);
+    }
+    insertDialog.showModal();
+    requestAnimationFrame(() => insertFields.querySelector("input, select")?.focus());
+  }
+
+  function insertPayload(kind) {
+    const form = new FormData(insertForm);
+    if (kind === "link") {
+      const href = String(form.get("href") || "").trim();
+      if (!href) return null;
+      return { href, label: String(form.get("label") || "").trim() };
+    }
+    if (kind === "image") {
+      const src = String(form.get("src") || "").trim();
+      if (!src) return null;
+      return { src, alt: String(form.get("alt") || "").trim() };
+    }
+    if (kind === "table") {
+      const rows = Number(form.get("rows"));
+      const columns = Number(form.get("columns"));
+      if (!Number.isInteger(rows) || !Number.isInteger(columns) || rows < 1 || rows > 20 || columns < 1 || columns > 20) {
+        toastMessage("Choose whole-number table dimensions from 1 to 20.");
+        return null;
+      }
+      return { rows, columns };
+    }
+    if (kind === "callout") return String(form.get("type") || "note");
+    return null;
+  }
+
+  function requestInsert(kind, value) {
+    if (value === undefined && ["link", "image", "table", "callout"].includes(kind)) {
+      openInsertDialog(kind);
+      return;
+    }
+    const pending = state.pendingInsert;
+    if (state.mode === "wmd" && pending?.rawSelection) {
+      editor.setSelectionRange(pending.rawSelection.start, pending.rawSelection.end);
+      editor.scrollTop = pending.rawSelection.scrollTop;
+      editor.scrollLeft = pending.rawSelection.scrollLeft;
+    }
+    if (state.mode === "document" && pending?.canvasSelection) state.canvasSelection = pending.canvasSelection;
+    state.pendingInsert = null;
+    if (state.mode === "document") insertCanvas(kind, value);
+    else insertRaw(kind, value);
+  }
+
+  function insertRaw(kind, value) {
+    if (kind === "callout") {
+      const type = CALLOUT_TYPES.includes(value) ? value : "note";
+      const title = calloutLabel(type);
+      const body = `Write the ${type} here.`;
+      const text = `\n!${type} ${title}\n${body}\n!end\n`;
+      const start = editor.selectionStart;
+      editor.setRangeText(text, start, editor.selectionEnd, "end");
+      const bodyStart = start + `\n!${type} ${title}\n`.length;
+      editor.setSelectionRange(bodyStart, bodyStart + body.length);
+      onRawInput();
+      editor.focus();
+      return;
+    }
+    if (kind === "table") {
+      const dimensions = value;
+      if (!dimensions) return;
+      const columns = Array.from({ length: dimensions.columns }, (_, index) => `Header ${index + 1}`);
+      const divider = Array.from({ length: dimensions.columns }, () => "---");
+      const body = Array.from({ length: Math.max(0, dimensions.rows - 1) }, () => `| ${Array(dimensions.columns).fill("").join(" | ")} |`);
+      const text = `\n| ${columns.join(" | ")} |\n| ${divider.join(" | ")} |${body.length ? `\n${body.join("\n")}` : ""}\n`;
+      const start = editor.selectionStart;
+      editor.setRangeText(text, start, editor.selectionEnd, "end");
+      editor.setSelectionRange(start + 3, start + 3 + columns[0].length);
+      onRawInput();
+      editor.focus();
+      return;
+    }
+    if (kind === "link") {
+      const link = value || {};
+      const start = editor.selectionStart;
+      const selected = editor.value.slice(start, editor.selectionEnd);
+      const label = link.label || selected || "link text";
+      const text = `[${label}](${link.href || "https://example.com"})`;
+      editor.setRangeText(text, start, editor.selectionEnd, "end");
+      editor.setSelectionRange(start + 1, start + 1 + label.length);
+      onRawInput();
+      editor.focus();
+      return;
+    }
+    if (kind === "image") {
+      const image = value || {};
+      const alt = image.alt || "image description";
+      const text = `![${alt}](${image.src || "https://example.com/image.png"})`;
+      const start = editor.selectionStart;
+      editor.setRangeText(text, start, editor.selectionEnd, "end");
+      editor.setSelectionRange(start + 2, start + 2 + alt.length);
+      onRawInput();
+      editor.focus();
+      return;
+    }
     const templates = {
-      link: ["[link text](https://example.com)", 1, 10],
-      image: ["![image description](https://example.com/image.png)", 2, 19],
       heading: ["\n## New heading\n", 4, 15],
       list: ["\n- List item\n", 3, 12],
-      callout: ["\n!note A helpful note\nWrite the note here.\n!end\n", 7, 20],
+      "ordered-list": ["\n1. List item\n", 4, 13],
       tab: ["\n@tab New tab\n@title New tab\n\n# New tab\n", 6, 13],
     };
     const [text, startOffset, endOffset] = templates[kind];
@@ -1266,7 +1637,7 @@
       if (key === "b") { event.preventDefault(); wrapRaw("*"); return; }
       if (key === "i") { event.preventDefault(); wrapRaw("_"); return; }
       if (key === "u") { event.preventDefault(); wrapRaw("++"); return; }
-      if (key === "k") { event.preventDefault(); insertRaw("link"); return; }
+      if (key === "k") { event.preventDefault(); requestInsert("link"); return; }
     }
     if (!['*', '_', '=', '`'].includes(event.key) || event.ctrlKey || event.metaKey || event.altKey) return;
     const start = editor.selectionStart;
@@ -1304,9 +1675,9 @@
     state.previewFocus = null;
   }
 
-  function sendCanvasState() {
+  function sendCanvasState(options = {}) {
     if (state.mode !== "document") return;
-    const selection = state.restoreCanvasSelection ? state.canvasSelection : null;
+    const selection = options.forceSelection || state.restoreCanvasSelection ? state.canvasSelection : null;
     postCanvas({
       type: "state",
       macros: settings.macros,
@@ -1324,24 +1695,22 @@
   }
 
   function sendCanvasCommand(command, value = "") {
+    sendCanvasState({ forceSelection: true });
     postCanvas({ type: "command", command, value });
   }
 
-  function insertCanvas(kind) {
-    if (kind === "link") {
-      const href = window.prompt("Link address", "https://example.com");
-      if (href) postCanvas({ type: "command", command: "insert", kind, value: href });
-      return;
-    }
-    if (kind === "image") {
-      const src = window.prompt("Image address", "https://example.com/image.png");
-      if (src) postCanvas({ type: "command", command: "insert", kind, value: src });
-      return;
-    }
+  function insertCanvas(kind, value) {
     if (kind === "heading") sendCanvasCommand("formatBlock", "h2");
-    else if (kind === "list") postCanvas({ type: "command", command: "insert", kind });
-    else postCanvas({ type: "command", command: "insert", kind });
+    else {
+      sendCanvasState({ forceSelection: true });
+      postCanvas({ type: "command", command: "insert", kind, value });
+    }
   }
+
+  function calloutLabel(type) {
+    return `${type.charAt(0).toUpperCase()}${type.slice(1)}`;
+  }
+
 
   function handleCanvasMessage(event) {
     if (event.source !== preview.contentWindow) return;
@@ -1386,7 +1755,8 @@
       };
       return;
     }
-    if (message.type === "request-link") insertCanvas("link");
+    if (message.type === "request-link") requestInsert("link");
+    if (message.type === "request-find") openFindDialog();
   }
 
   function handlePreviewMessage(event) {
@@ -1412,9 +1782,39 @@
       const initials = user.name.split(/\s+/).map((part) => part[0]).join("").slice(0, 2).toUpperCase();
       avatar.textContent = initials || "G";
       avatar.style.background = user.color || "#3f7f6b";
-      avatar.title = user.id === state.clientId ? `${user.name} (you)` : `${user.name} is editing`;
+      const self = user.id === state.clientId;
+      avatar.disabled = self || !user.selection;
+      avatar.title = self ? `${user.name} (you)` : user.selection ? `Jump to ${user.name}` : `${user.name} is viewing`;
+      if (!self && user.selection) avatar.addEventListener("click", () => jumpToUser(user));
       presence.append(avatar);
     });
+  }
+
+  function jumpToUser(user) {
+    const selection = user.selection;
+    if (!selection) return;
+    if (selection.mode === "wmd") {
+      setMode("wmd", true);
+      requestAnimationFrame(() => {
+        const start = clamp(selection.start, 0, state.source.length);
+        const end = clamp(selection.end, 0, state.source.length);
+        editor.setSelectionRange(start, end);
+        const line = state.source.slice(0, start).split("\n").length - 1;
+        const lineHeight = Number.parseFloat(getComputedStyle(editor).lineHeight) || 23;
+        editor.scrollTop = Math.max(0, line * lineHeight - editor.clientHeight / 2);
+        editor.focus();
+        scheduleRawSelection();
+      });
+    } else {
+      state.canvasSelection = {
+        start: Math.max(0, Number(selection.start) || 0),
+        end: Math.max(0, Number(selection.end) || 0),
+      };
+      state.restoreCanvasSelection = true;
+      if (state.mode === "document") sendCanvasState({ forceSelection: true });
+      else setMode("document");
+    }
+    toastMessage(`Jumped to ${user.name}.`);
   }
 
   function openDocument(nextId, options = {}) {
@@ -1610,10 +2010,7 @@
         setTimeout(onRawInput, 0);
       }
     }));
-    document.querySelectorAll("[data-insert]").forEach((button) => button.addEventListener("click", () => {
-      if (state.mode === "document") insertCanvas(button.dataset.insert);
-      else insertRaw(button.dataset.insert);
-    }));
+    document.querySelectorAll("[data-insert]").forEach((button) => button.addEventListener("click", () => requestInsert(button.dataset.insert)));
     document.querySelectorAll("[data-document-command]").forEach((button) => button.addEventListener("click", () => {
       const command = button.dataset.documentCommand;
       if (command === "size-down") adjustBaseSize(-1);
@@ -1641,6 +2038,7 @@
     });
     document.querySelector("#uploadButton").addEventListener("click", () => importInput.click());
     importInput.addEventListener("change", () => importDocument(importInput.files[0]));
+    document.querySelector("#renameButton").addEventListener("click", openRenameDialog);
     document.querySelector("#downloadButton").addEventListener("click", downloadDocument);
     document.querySelector("#shareButton").addEventListener("click", async () => {
       try {
@@ -1656,6 +2054,11 @@
       if (!panelMenu.hidden && !panelMenu.contains(event.target) && !panelsButton.contains(event.target)) setPanelMenu(false);
     });
     document.addEventListener("keydown", (event) => {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "h") {
+        event.preventDefault();
+        openFindDialog();
+        return;
+      }
       if (event.key === "Escape") setPanelMenu(false);
     });
     document.querySelectorAll("[data-panel-toggle]").forEach((input) => input.addEventListener("change", () => {
@@ -1675,6 +2078,35 @@
     }));
 
     document.querySelector("#settingsButton").addEventListener("click", openSettings);
+    insertForm.addEventListener("submit", (event) => {
+      if (event.submitter?.id !== "confirmInsertButton") return;
+      event.preventDefault();
+      const pending = state.pendingInsert;
+      if (!pending) return;
+      const payload = insertPayload(pending.kind);
+      if (payload === null) return;
+      insertDialog.close("insert");
+      requestInsert(pending.kind, payload);
+    });
+    insertDialog.addEventListener("close", () => {
+      if (insertDialog.returnValue !== "insert") state.pendingInsert = null;
+    });
+    renameForm.addEventListener("submit", (event) => {
+      if (event.submitter?.id !== "confirmRenameButton") return;
+      event.preventDefault();
+      const title = renameInput.value.trim();
+      if (!title) return;
+      renameDocument(title);
+      renameDialog.close("rename");
+    });
+    document.querySelector("#findReplaceButton").addEventListener("click", openFindDialog);
+    findForm.addEventListener("submit", (event) => {
+      event.preventDefault();
+      findNext();
+    });
+    document.querySelector("#findNextButton").addEventListener("click", findNext);
+    document.querySelector("#replaceButton").addEventListener("click", replaceCurrentMatch);
+    document.querySelector("#replaceAllButton").addEventListener("click", replaceAllMatches);
     document.querySelector("#addMacroButton").addEventListener("click", () => addMacroRow());
     settingsForm.addEventListener("submit", (event) => {
       if (event.submitter && event.submitter.id === "saveSettingsButton") {

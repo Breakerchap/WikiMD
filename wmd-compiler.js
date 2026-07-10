@@ -1111,6 +1111,25 @@ ${finalWarnings.map((warning) => `<p>${escapeHtml(warning)}</p>`).join("\n")}
     overflow-x: auto;
   }
 
+  table {
+    width: 100%;
+    margin: 1.2rem 0;
+    border-collapse: collapse;
+  }
+
+  th,
+  td {
+    padding: 0.65rem 0.8rem;
+    border: 1px solid var(--border);
+    text-align: left;
+    vertical-align: top;
+  }
+
+  th {
+    background: var(--panel);
+    font-weight: bold;
+  }
+
   .highlight {
     padding: 0.08em 0.25em;
     border-radius: 4px;

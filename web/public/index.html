@@ -26,6 +26,7 @@
           <span class="connection-status" id="connectionStatus">Connecting</span>
           <button class="quiet-button" id="uploadButton" type="button">Upload</button>
           <input id="importInput" type="file" accept=".md,.markdown,.wmd,.docx" hidden>
+          <button class="quiet-button" id="renameButton" type="button">Rename</button>
           <button class="quiet-button" id="panelsButton" type="button" aria-expanded="false">Panels</button>
           <button class="quiet-button" id="settingsButton" type="button">Settings</button>
           <button class="quiet-button" id="shareButton" type="button">Share</button>
@@ -40,12 +41,20 @@
           <option value="h2">Heading 1</option>
           <option value="h3">Heading 2</option>
           <option value="h4">Heading 3</option>
+          <option value="h5">Heading 4</option>
+          <option value="h6">Heading 5</option>
         </select>
         <select id="fontControl" aria-label="Document font" title="Document font">
-          <option value="Arial, sans-serif">Arial</option>
-          <option value="Georgia, serif">Georgia</option>
-          <option value="Verdana, sans-serif">Verdana</option>
-          <option value="Consolas, monospace">Consolas</option>
+          <option value="Arial, sans-serif" style="font-family: Arial, sans-serif">Arial</option>
+          <option value="Aptos, Calibri, sans-serif" style="font-family: Aptos, Calibri, sans-serif">Aptos</option>
+          <option value="Verdana, sans-serif" style="font-family: Verdana, sans-serif">Verdana</option>
+          <option value="Trebuchet MS, sans-serif" style="font-family: 'Trebuchet MS', sans-serif">Trebuchet MS</option>
+          <option value="Georgia, serif" style="font-family: Georgia, serif">Georgia</option>
+          <option value="Palatino Linotype, serif" style="font-family: 'Palatino Linotype', serif">Palatino</option>
+          <option value="Garamond, serif" style="font-family: Garamond, serif">Garamond</option>
+          <option value="Times New Roman, serif" style="font-family: 'Times New Roman', serif">Times New Roman</option>
+          <option value="Consolas, monospace" style="font-family: Consolas, monospace">Consolas</option>
+          <option value="Courier New, monospace" style="font-family: 'Courier New', monospace">Courier New</option>
         </select>
         <span class="toolbar-divider"></span>
         <button data-document-command="size-down" type="button" title="Decrease document size">-</button>
@@ -54,16 +63,19 @@
         <span class="toolbar-divider"></span>
         <button data-command="undo" type="button" title="Undo (Ctrl+Z)">Undo</button>
         <button data-command="redo" type="button" title="Redo (Ctrl+Shift+Z)">Redo</button>
+        <button id="findReplaceButton" type="button" title="Find and replace (Ctrl+H)">Find</button>
         <span class="toolbar-divider"></span>
         <button data-command="bold" type="button" title="Bold (Ctrl+B)"><b>B</b></button>
         <button data-command="italic" type="button" title="Italic (Ctrl+I)"><i>I</i></button>
-        <button data-command="underline" type="button" title="Underline">U</button>
+        <button class="underline-button" data-command="underline" type="button" title="Underline">U</button>
         <button data-command="highlight" type="button" title="Highlight">Pen</button>
         <span class="toolbar-divider"></span>
         <button data-insert="link" type="button" title="Insert link (Ctrl+K)">Link</button>
         <button data-insert="image" type="button" title="Insert image">Image</button>
         <button data-insert="heading" type="button" title="Insert heading">Heading</button>
-        <button data-insert="list" type="button" title="Insert list">List</button>
+        <button data-insert="list" type="button" title="Insert bulleted list">Bullets</button>
+        <button data-insert="ordered-list" type="button" title="Insert numbered list">Numbered</button>
+        <button data-insert="table" type="button" title="Insert table">Table</button>
         <button data-insert="callout" type="button" title="Insert callout">Callout</button>
         <button data-insert="tab" type="button" title="Insert WMD tab">Tab</button>
         <span class="toolbar-divider toolbar-spacer"></span>
@@ -123,7 +135,7 @@
     </main>
 
     <template id="userTemplate">
-      <span class="avatar" title=""></span>
+      <button class="avatar" type="button" title=""></button>
     </template>
     <template id="macroTemplate">
       <div class="macro-row">
@@ -186,6 +198,67 @@
         <div class="settings-actions">
           <button class="quiet-button" value="cancel" type="submit">Cancel</button>
           <button class="primary-button" id="saveSettingsButton" value="default" type="submit">Save settings</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog class="insert-dialog" id="insertDialog">
+      <form method="dialog" id="insertForm">
+        <div class="settings-heading">
+          <div>
+            <span class="eyebrow">Document insert</span>
+            <h2 id="insertDialogTitle">Insert</h2>
+          </div>
+          <button class="icon-button settings-close" value="cancel" aria-label="Close insert dialog" type="submit">x</button>
+        </div>
+        <p class="insert-dialog-description" id="insertDialogDescription"></p>
+        <div class="insert-fields" id="insertFields"></div>
+        <div class="settings-actions">
+          <button class="quiet-button" value="cancel" type="submit">Cancel</button>
+          <button class="primary-button" id="confirmInsertButton" value="default" type="submit">Insert</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog class="rename-dialog" id="renameDialog">
+      <form method="dialog" id="renameForm">
+        <div class="settings-heading">
+          <div>
+            <span class="eyebrow">Document details</span>
+            <h2>Rename document</h2>
+          </div>
+          <button class="icon-button settings-close" value="cancel" aria-label="Close rename dialog" type="submit">x</button>
+        </div>
+        <label class="setting-field">Document title
+          <input id="renameInput" maxlength="120" autocomplete="off" required>
+        </label>
+        <div class="settings-actions">
+          <button class="quiet-button" value="cancel" type="submit">Cancel</button>
+          <button class="primary-button" id="confirmRenameButton" value="default" type="submit">Rename</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog class="find-dialog" id="findDialog">
+      <form method="dialog" id="findForm">
+        <div class="settings-heading">
+          <div>
+            <span class="eyebrow">Search document</span>
+            <h2>Find and replace</h2>
+          </div>
+          <button class="icon-button settings-close" value="cancel" aria-label="Close find and replace" type="submit">x</button>
+        </div>
+        <label class="setting-field">Find
+          <input id="findInput" autocomplete="off" required>
+        </label>
+        <label class="setting-field">Replace with
+          <input id="replaceInput" autocomplete="off">
+        </label>
+        <p class="find-status" id="findStatus" aria-live="polite"></p>
+        <div class="find-actions">
+          <button class="quiet-button" id="findNextButton" type="button">Find next</button>
+          <button class="quiet-button" id="replaceButton" type="button">Replace</button>
+          <button class="primary-button" id="replaceAllButton" type="button">Replace all</button>
         </div>
       </form>
     </dialog>
