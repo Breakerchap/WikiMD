@@ -1,6 +1,6 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
-const { applyOperation, createStarterDocument, normalizeDocumentId, transformOperations } = require("../web/server");
+const { applyOperation, createStarterDocument, mapOffsetThroughOperation, normalizeDocumentId, transformOperations } = require("../web/server");
 
 test("normalizes document names into shareable ids", () => {
   assert.equal(normalizeDocumentId("My Team Notes.docx"), "my-team-notes");
@@ -32,6 +32,42 @@ test("transforms a deletion against a simultaneous insertion", () => {
   assert.equal(
     applyOperation(applyOperation(original, insertion), deletionPrime),
     applyOperation(applyOperation(original, deletion), insertionPrime),
+  );
+});
+
+test("maps source-mode cursors through incoming edits", () => {
+  const insertion = { ops: [2, "++", 3] };
+  assert.equal(mapOffsetThroughOperation(0, insertion), 0);
+  assert.equal(mapOffsetThroughOperation(2, insertion), 2);
+  assert.equal(mapOffsetThroughOperation(5, insertion), 7);
+
+  const deletion = { ops: [2, -2, 3] };
+  assert.equal(mapOffsetThroughOperation(2, deletion), 2);
+  assert.equal(mapOffsetThroughOperation(4, deletion), 2);
+  assert.equal(mapOffsetThroughOperation(6, deletion), 4);
+});
+
+test("rebases a stale document-canvas edit over sequential remote edits", () => {
+  const original = "abcdef";
+  const local = { ops: [6, "!"] };
+  const remoteOperations = [
+    { ops: [1, "X", 5] },
+    { ops: [4, -1, 2] },
+  ];
+  let rebasedLocal = local;
+  const rebasedRemote = [];
+
+  for (const remote of remoteOperations) {
+    const [localPrime, remotePrime] = transformOperations(rebasedLocal, remote);
+    rebasedLocal = localPrime;
+    rebasedRemote.push(remotePrime);
+  }
+
+  const currentServerText = remoteOperations.reduce(applyOperation, original);
+  const localCanvasText = applyOperation(original, local);
+  assert.equal(
+    applyOperation(currentServerText, rebasedLocal),
+    rebasedRemote.reduce(applyOperation, localCanvasText),
   );
 });
 
