@@ -38,7 +38,7 @@ test("transforms a deletion against a simultaneous insertion", () => {
 
 test("new documents start with config-driven heading styles", () => {
   const source = createStarterDocument("new-notes");
-  assert.ok(source.startsWith("@config\nNormal Text: {wmd-formatting: ; keybind: ctrl+shift+0; size: 16px; font: arial};\n"));
+  assert.ok(source.startsWith("@config\nNormal Text: {wmd-formatting: ; keybind: ctrl+shift+0; size: 16px; font: arial; default: true};\n"));
   assert.ok(source.includes("Title: {wmd-formatting: @title; keybind: ctrl+shift+`; size: 45px; font: arial};"));
   assert.ok(source.includes("Heading 1: {wmd-formatting: #; keybind: ctrl+shift+1; size: 38px; font: arial; bold: true};"));
   assert.ok(source.includes("Heading 4: {wmd-formatting: ####; keybind: ctrl+shift+4; size: 18px; font: arial; bold: false; italic: true};"));

@@ -7,7 +7,7 @@
   const CALLOUT_TYPES = ["note", "tip", "info", "warning", "danger", "rule", "example"];
   const DEFAULT_DOCUMENT_CONFIG = [
     "@config",
-    "Normal Text: {wmd-formatting: ; keybind: ctrl+shift+0; size: 16px; font: arial};",
+    "Normal Text: {wmd-formatting: ; keybind: ctrl+shift+0; size: 16px; font: arial; default: true};",
     "Title: {wmd-formatting: @title; keybind: ctrl+shift+`; size: 45px; font: arial};",
     "Heading 1: {wmd-formatting: #; keybind: ctrl+shift+1; size: 38px; font: arial; bold: true};",
     "Heading 2: {wmd-formatting: ##; keybind: ctrl+shift+2; size: 28px; font: arial; bold: true};",
@@ -365,6 +365,7 @@
       calloutText: normalizeCssValue(prop("callout-text") ?? prop("text") ?? prop("text-color") ?? prop("text-colour") ?? fallback.calloutText),
       calloutTitleColor: normalizeCssValue(prop("callout-title-color") ?? prop("callout-title-colour") ?? prop("title-color") ?? prop("title-colour") ?? fallback.calloutTitleColor),
       calloutRadius: normalizeCssValue(prop("callout-radius") ?? prop("radius") ?? prop("border-radius") ?? fallback.calloutRadius),
+      default: prop("default") !== undefined || prop("default") !== undefined ? parseStyleBoolean(prop("default") ?? prop("default")) : Boolean(fallback.default),
       builtin: false,
     };
   }
@@ -376,12 +377,12 @@
 
   function fallbackPresetFor(source, index = 0) {
     const id = normalizePresetId(source && (source.id || source.name), `custom-style-${index + 1}`);
-    return { id, name: source?.name || "Custom style", wmdFormatting: "@style", font: "", size: "", bold: false, italic: false, underline: false, strike: false, highlight: false, block: "paragraph", heading: false, level: "", shortcut: "", calloutType: "note", calloutTitle: "", calloutIcon: "", calloutBackground: "", calloutBorder: "", calloutText: "", calloutTitleColor: "", calloutRadius: "", builtin: false };
+    return { id, name: source?.name || "Custom style", wmdFormatting: "@style", font: "", size: "", bold: false, italic: false, underline: false, strike: false, highlight: false, block: "paragraph", heading: false, level: "", shortcut: "", calloutType: "note", calloutTitle: "", calloutIcon: "", calloutBackground: "", calloutBorder: "", calloutText: "", calloutTitleColor: "", calloutRadius: "", default: false, builtin: false };
   }
 
   function normalizeStylePresetList(value) {
     const usedIds = new Set();
-    return (Array.isArray(value) ? value : []).map((preset, index) => {
+    const normalizedPresets = (Array.isArray(value) ? value : []).map((preset, index) => {
       const fallback = fallbackPresetFor(preset, index);
       const normalized = normalizeStylePreset(preset, fallback, false);
       if (!normalized) return null;
@@ -389,6 +390,22 @@
       usedIds.add(normalized.id);
       return normalized;
     }).filter(Boolean);
+    let defaultAssigned = false;
+    normalizedPresets.forEach((preset) => {
+      if (preset.default && !defaultAssigned) {
+        defaultAssigned = true;
+        return;
+      }
+      preset.default = false;
+    });
+    if (!defaultAssigned) {
+      const fallbackDefault = normalizedPresets.find((preset) => preset.id === "normal-text")
+        || normalizedPresets.find((preset) => preset.block === "paragraph" && !preset.wmdFormatting)
+        || normalizedPresets[0]
+        || null;
+      if (fallbackDefault) fallbackDefault.default = true;
+    }
+    return normalizedPresets;
   }
 
   function normalizeServerUrl(value) {
@@ -612,6 +629,14 @@
     return normalizeStylePresetList(parseStylePresetConfig(state.source));
   }
 
+  function defaultDocumentPreset() {
+    const presets = documentStylePresets();
+    return presets.find((preset) => preset.default)
+      || presets.find((preset) => preset.block === "paragraph" && !preset.wmdFormatting)
+      || presets[0]
+      || null;
+  }
+
   function stylePresetById(id) {
     return documentStylePresets().find((preset) => preset.id === id) || null;
   }
@@ -631,7 +656,8 @@
     create.value = "preset:new";
     create.textContent = "+ New custom style...";
     blockStyleControl.append(create);
-    const fallback = presets[0] ? `preset:${presets[0].id}` : "preset:new";
+    const fallbackPreset = defaultDocumentPreset() || presets[0] || null;
+    const fallback = fallbackPreset ? `preset:${fallbackPreset.id}` : "preset:new";
     blockStyleControl.value = [...blockStyleControl.options].some((option) => option.value === selected) ? selected : fallback;
   }
 
@@ -737,7 +763,7 @@
 
   function saveStylePreset(values, presetId) {
     const existing = stylePresetById(presetId);
-    const fallback = existing || { id: customPresetId(values?.name), name: "Custom style", wmdFormatting: "@style", font: "", size: "", bold: false, italic: false, underline: false, strike: false, highlight: false, block: "paragraph", heading: false, level: "", shortcut: "", calloutType: "note", builtin: false };
+    const fallback = existing || { id: customPresetId(values?.name), name: "Custom style", wmdFormatting: "@style", font: "", size: "", bold: false, italic: false, underline: false, strike: false, highlight: false, block: "paragraph", heading: false, level: "", shortcut: "", calloutType: "note", default: false, builtin: false };
     const sourcePreset = { ...fallback, ...values };
     if (existing && values?.name) delete sourcePreset.id;
     const nextPreset = normalizeStylePreset(sourcePreset, fallback, false);
@@ -799,6 +825,7 @@
     add("underline", preset.underline ? "true" : "");
     add("strike", preset.strike ? "true" : "");
     add("highlight", preset.highlight ? "true" : "");
+    add("default", preset.default ? "true" : "");
     add("callout-type", preset.calloutType && preset.block === "callout" ? preset.calloutType : "");
     add("callout-title", preset.calloutTitle || "");
     add("callout-icon", preset.calloutIcon || "");
@@ -809,6 +836,17 @@
     add("callout-radius", preset.calloutRadius || "");
     const name = (preset.name || preset.id || "Custom Style").replace(/[\r\n:{};]/g, " ").replace(/\s+/g, " ").trim();
     return `${name}: {${props.join("; ")}};`;
+  }
+
+  function clearDefaultFlagFromConfigLine(line) {
+    const match = String(line || "").match(/^(\s*[^:]+:\s*\{)([\s\S]*?)(\}\s*;?\s*)$/);
+    if (!match) return line;
+    const props = match[2]
+      .split(";")
+      .map((part) => part.trim())
+      .filter(Boolean)
+      .filter((part) => !/^(?:default|default)\s*:/i.test(part));
+    return `${match[1]}${props.join("; ")}${match[3]}`;
   }
 
 
@@ -829,6 +867,12 @@
         }
       }
       if (!replaced) replacementLines.splice(Math.max(1, replacementLines.length - 1), 0, line);
+      if (preset.default) {
+        for (let index = 1; index < replacementLines.length - 1; index += 1) {
+          const id = configStyleLineId(replacementLines[index]);
+          if (id && id !== preset.id) replacementLines[index] = clearDefaultFlagFromConfigLine(replacementLines[index]);
+        }
+      }
       return source.replace(configMatch[0], replacementLines.join("\n"));
     }
 
@@ -1576,32 +1620,38 @@
     });
   }
 
+  function setupEditableHeadingCollapse(heading, section) {
+    if (!heading || !/^H[1-6]$/.test(heading.tagName) || heading.classList.contains('tab-title')) return heading;
+    // Clone compiler-rendered headings so their click handlers cannot intercept text editing.
+    var editableHeading = heading.cloneNode(true);
+    heading.replaceWith(editableHeading);
+    editableHeading.classList.remove('collapsible-heading');
+    editableHeading.dataset.collapsed = 'false';
+    editableHeading.querySelectorAll('.heading-collapse-marker, .wmd-studio-heading-toggle').forEach(function(marker) { marker.remove(); });
+    var toggle = document.createElement('button');
+    toggle.type = 'button';
+    toggle.className = 'heading-collapse-marker wmd-studio-heading-toggle';
+    toggle.contentEditable = 'false';
+    toggle.textContent = 'v';
+    toggle.setAttribute('aria-label', 'Collapse section');
+    toggle.addEventListener('pointerdown', function(event) { event.preventDefault(); });
+    toggle.addEventListener('click', function(event) {
+      event.preventDefault();
+      event.stopPropagation();
+      editableHeading.dataset.collapsed = editableHeading.dataset.collapsed === 'true' ? 'false' : 'true';
+      updateEditableHeadingVisibility(section || editableHeading.closest('.tab-section'));
+    });
+    editableHeading.insertBefore(toggle, editableHeading.firstChild);
+    return editableHeading;
+  }
+
   function setupEditableHeadingCollapses() {
     var sections = Array.prototype.slice.call(main.querySelectorAll(':scope > section.tab-section'));
     sections.forEach(function(section) {
       Array.prototype.slice.call(section.children).filter(function(node) {
         return /^H[1-6]$/.test(node.tagName) && !node.classList.contains('tab-title');
       }).forEach(function(heading) {
-        // Cloning removes the compiler's whole-heading click listener so heading text stays editable.
-        var editableHeading = heading.cloneNode(true);
-        heading.replaceWith(editableHeading);
-        editableHeading.classList.remove('collapsible-heading');
-        editableHeading.dataset.collapsed = 'false';
-        editableHeading.querySelectorAll('.heading-collapse-marker, .wmd-studio-heading-toggle').forEach(function(marker) { marker.remove(); });
-        var toggle = document.createElement('button');
-        toggle.type = 'button';
-        toggle.className = 'heading-collapse-marker wmd-studio-heading-toggle';
-        toggle.contentEditable = 'false';
-        toggle.textContent = 'v';
-        toggle.setAttribute('aria-label', 'Collapse section');
-        toggle.addEventListener('pointerdown', function(event) { event.preventDefault(); });
-        toggle.addEventListener('click', function(event) {
-          event.preventDefault();
-          event.stopPropagation();
-          editableHeading.dataset.collapsed = editableHeading.dataset.collapsed === 'true' ? 'false' : 'true';
-          updateEditableHeadingVisibility(section);
-        });
-        editableHeading.insertBefore(toggle, editableHeading.firstChild);
+        setupEditableHeadingCollapse(heading, section);
       });
       updateEditableHeadingVisibility(section);
     });
@@ -1789,10 +1839,244 @@
     return nativePreset ? nativePreset.id : '';
   }
 
+  function defaultPreset() {
+    return presets.find(function(preset) { return preset && preset.default; })
+      || presets.find(function(preset) { return preset && preset.block === 'paragraph' && !preset.wmdFormatting; })
+      || presets[0]
+      || null;
+  }
+
+  function humanizeCalloutType(type) {
+    return String(type || 'note')
+      .replace(/[-_]+/g, ' ')
+      .replace(/\b[a-z]/g, function(letter) { return letter.toUpperCase(); });
+  }
+
+  function applyPresetAttributes(block, style) {
+    if (!block || !style || !style.id) return;
+    block.dataset.wmdPreset = style.id;
+    block.classList.add('wmd-preset-' + style.id);
+  }
+
+  function editableTextNodes(root) {
+    if (!root) return [];
+    var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+      acceptNode: function(node) {
+        var parent = node.parentElement;
+        return parent && parent.closest('[contenteditable="false"], .wmd-studio-cursor, .heading-collapse-marker')
+          ? NodeFilter.FILTER_REJECT
+          : NodeFilter.FILTER_ACCEPT;
+      },
+    });
+    var nodes = [];
+    var node = walker.nextNode();
+    while (node) {
+      nodes.push(node);
+      node = walker.nextNode();
+    }
+    return nodes;
+  }
+
+  function textOffsetIn(root, node, offset) {
+    var nodes = editableTextNodes(root);
+    var count = 0;
+    for (var index = 0; index < nodes.length; index += 1) {
+      if (nodes[index] === node) return count + Math.max(0, Math.min(Number(offset) || 0, nodes[index].data.length));
+      count += nodes[index].data.length;
+    }
+    return count;
+  }
+
+  function restoreTextSelection(root, start, end) {
+    var nodes = editableTextNodes(root);
+    if (!nodes.length) {
+      placeCaretAtStart(root);
+      return;
+    }
+    var positionFor = function(offset) {
+      var remaining = Math.max(0, Number(offset) || 0);
+      for (var index = 0; index < nodes.length; index += 1) {
+        if (remaining <= nodes[index].data.length) return { node: nodes[index], offset: remaining };
+        remaining -= nodes[index].data.length;
+      }
+      var last = nodes[nodes.length - 1];
+      return { node: last, offset: last.data.length };
+    };
+    var from = positionFor(start);
+    var to = positionFor(end);
+    var range = document.createRange();
+    var selection = window.getSelection();
+    try {
+      range.setStart(from.node, from.offset);
+      range.setEnd(to.node, to.offset);
+      selection.removeAllRanges();
+      selection.addRange(range);
+      main.focus();
+    } catch (_) {
+      placeCaretAtStart(root);
+    }
+  }
+
+  function ensureInlineTargetContent(target, fragment) {
+    if (!target) return;
+    if (fragment && fragment.querySelectorAll) {
+      fragment.querySelectorAll('.heading-collapse-marker, .wmd-studio-heading-toggle').forEach(function(node) { node.remove(); });
+    }
+    if (fragment && fragment.childNodes && fragment.childNodes.length) target.appendChild(fragment);
+    if (!target.textContent.replace(/\u200b/g, '').trim() && !target.querySelector('br,img,input,table,hr')) {
+      target.appendChild(document.createElement('br'));
+    }
+  }
+
+  function createBlockFromPreset(style, fragment) {
+    var blockKind = style && style.block ? style.block : 'paragraph';
+    var level = style && style.level ? Math.max(1, Math.min(6, Number(style.level) || 1)) : '';
+    var block;
+    var focusTarget;
+
+    if (blockKind === 'title') {
+      block = document.createElement('h1');
+      block.classList.add('tab-title');
+      focusTarget = block;
+      ensureInlineTargetContent(block, fragment);
+    } else if (blockKind === 'heading') {
+      block = document.createElement('h' + (level || 2));
+      focusTarget = block;
+      ensureInlineTargetContent(block, fragment);
+    } else if (blockKind === 'bullet-list' || blockKind === 'numbered-list' || blockKind === 'checklist') {
+      block = document.createElement(blockKind === 'numbered-list' ? 'ol' : 'ul');
+      var item = document.createElement('li');
+      if (blockKind === 'checklist') {
+        var checkbox = document.createElement('input');
+        checkbox.className = 'task-checkbox';
+        checkbox.type = 'checkbox';
+        checkbox.contentEditable = 'false';
+        item.appendChild(checkbox);
+        item.appendChild(document.createTextNode(' '));
+      }
+      focusTarget = item;
+      ensureInlineTargetContent(item, fragment);
+      block.appendChild(item);
+    } else if (blockKind === 'callout') {
+      block = document.createElement('div');
+      block.className = 'callout callout-' + (style.calloutType || 'note');
+      var title = document.createElement('div');
+      title.className = 'callout-title';
+      title.textContent = style.calloutTitle || style.name || humanizeCalloutType(style.calloutType || 'note');
+      var body = document.createElement('div');
+      body.className = 'callout-body';
+      var paragraph = document.createElement('p');
+      focusTarget = paragraph;
+      ensureInlineTargetContent(paragraph, fragment);
+      body.appendChild(paragraph);
+      block.append(title, body);
+    } else {
+      block = document.createElement('p');
+      focusTarget = block;
+      ensureInlineTargetContent(block, fragment);
+    }
+
+    applyPresetAttributes(block, style);
+    return { block: block, focusTarget: focusTarget || block };
+  }
+
+  function placeCaretAtStart(target) {
+    if (!target) return;
+    var selection = window.getSelection();
+    if (!selection) return;
+    var walker = document.createTreeWalker(target, NodeFilter.SHOW_TEXT, {
+      acceptNode: function(node) {
+        return node.parentElement && node.parentElement.closest('[contenteditable="false"]')
+          ? NodeFilter.FILTER_REJECT
+          : NodeFilter.FILTER_ACCEPT;
+      },
+    });
+    var textNode = walker.nextNode();
+    var range = document.createRange();
+    try {
+      if (textNode) range.setStart(textNode, 0);
+      else {
+        range.selectNodeContents(target);
+        range.collapse(true);
+      }
+      range.collapse(true);
+      selection.removeAllRanges();
+      selection.addRange(range);
+      main.focus();
+    } catch (_) {}
+  }
+
+  function splitHeadingIntoDefaultBlock() {
+    var block = selectedBlock();
+    var selection = window.getSelection();
+    if (!block || !selection || !selection.rangeCount) return false;
+    var isHeading = block.classList.contains('tab-title') || /^H[1-6]$/.test(block.tagName || '');
+    if (!isHeading) return false;
+    var preset = defaultPreset();
+    if (!preset || !block.parentNode) return false;
+    var range = selection.getRangeAt(0).cloneRange();
+    if (!block.contains(range.startContainer) || !block.contains(range.endContainer)) return false;
+    if (!range.collapsed) range.deleteContents();
+    var caret = selection.rangeCount ? selection.getRangeAt(0).cloneRange() : range;
+    if (!block.contains(caret.startContainer)) {
+      caret.selectNodeContents(block);
+      caret.collapse(false);
+    }
+    var trailingRange = caret.cloneRange();
+    trailingRange.setEnd(block, block.childNodes.length);
+    var trailing = trailingRange.extractContents();
+    var created = createBlockFromPreset(preset, trailing);
+    block.parentNode.insertBefore(created.block, block.nextSibling);
+    setupTaskCheckboxes();
+    placeCaretAtStart(created.focusTarget);
+    return true;
+  }
+
+  function replaceSelectedBlockWithPreset(style) {
+    var block = selectedBlock();
+    var selection = window.getSelection();
+    if (!block || !selection || !selection.rangeCount || !block.parentNode) return false;
+    // List conversion has its own structure rules; leave it to the browser fallback below.
+    if (!/^(H[1-6]|P|BLOCKQUOTE|PRE)$/.test(block.tagName) && !block.classList.contains('tab-title')) return false;
+    var range = selection.getRangeAt(0).cloneRange();
+    if (!block.contains(range.startContainer) || !block.contains(range.endContainer)) return false;
+
+    var start = textOffsetIn(block, range.startContainer, range.startOffset);
+    var end = textOffsetIn(block, range.endContainer, range.endOffset);
+    var fragmentRange = document.createRange();
+    fragmentRange.selectNodeContents(block);
+    var fragment = fragmentRange.extractContents();
+    fragment.querySelectorAll('.heading-collapse-marker, .wmd-studio-heading-toggle, .wmd-studio-cursor, input.task-checkbox').forEach(function(node) { node.remove(); });
+
+    var blockKind = style.block || (style.heading ? 'heading' : 'paragraph');
+    var effectiveStyle = style;
+    if (blockKind === 'heading' && !style.level && /^H[1-6]$/.test(block.tagName)) {
+      effectiveStyle = Object.assign({}, style, { level: Number(block.tagName.slice(1)) });
+    }
+    var created = createBlockFromPreset(effectiveStyle, fragment);
+    var section = block.closest('.tab-section');
+    block.replaceWith(created.block);
+
+    if (/^H[1-6]$/.test(created.block.tagName) && !created.block.classList.contains('tab-title')) {
+      var editableHeading = setupEditableHeadingCollapse(created.block, section);
+      created.block = editableHeading;
+      created.focusTarget = editableHeading;
+    }
+    updateEditableHeadingVisibility(section);
+    setupTaskCheckboxes();
+    restoreTextSelection(created.focusTarget, start, end);
+    return true;
+  }
+
   function applyPreset(preset) {
     var style = preset && typeof preset === 'object' ? preset : {};
     var blockKind = style.block || (style.heading ? 'heading' : 'paragraph');
     var level = style.level ? Math.max(1, Math.min(6, Number(style.level) || 1)) : '';
+
+    if (replaceSelectedBlockWithPreset(style)) {
+      notifyInput();
+      return;
+    }
 
     if (blockKind === 'title') document.execCommand('formatBlock', false, 'h1');
     if (blockKind === 'heading' && level) document.execCommand('formatBlock', false, 'h' + level);
@@ -1941,6 +2225,17 @@
   main.addEventListener('keyup', function() { post('selection', selectionInfo()); });
   main.addEventListener('keydown', function(event) {
     if (event.key === 'Enter' && !event.isComposing) {
+      if (event.shiftKey) {
+        event.preventDefault();
+        document.execCommand('insertLineBreak');
+        notifyInput();
+        return;
+      }
+      if (splitHeadingIntoDefaultBlock()) {
+        event.preventDefault();
+        notifyInput();
+        return;
+      }
       event.preventDefault();
       document.execCommand('insertLineBreak');
       notifyInput();
@@ -1957,9 +2252,9 @@
     if (key === 'z') { event.preventDefault(); post('request-history', { direction: event.shiftKey ? 'redo' : 'undo' }); return; }
     if (key === 'y') { event.preventDefault(); post('request-history', { direction: 'redo' }); return; }
     if (key === 'h') { event.preventDefault(); post('request-find', {}); return; }
-    if (key === 'b') { event.preventDefault(); if (selectedPresetId()) post('request-preset-format', { preset: selectedPresetId(), command: 'bold' }); else command({ command: 'bold' }); }
-    if (key === 'i') { event.preventDefault(); if (selectedPresetId()) post('request-preset-format', { preset: selectedPresetId(), command: 'italic' }); else command({ command: 'italic' }); }
-    if (key === 'u') { event.preventDefault(); if (selectedPresetId()) post('request-preset-format', { preset: selectedPresetId(), command: 'underline' }); else command({ command: 'underline' }); }
+    if (key === 'b') { event.preventDefault(); command({ command: 'bold' }); }
+    if (key === 'i') { event.preventDefault(); command({ command: 'italic' }); }
+    if (key === 'u') { event.preventDefault(); command({ command: 'underline' }); }
     if (key === 'k') { event.preventDefault(); post('request-link', {}); }
   });
   document.addEventListener('selectionchange', function() {
@@ -2452,7 +2747,7 @@
           : CALLOUT_TYPES.map((type) => ({ value: type, label: calloutLabel(type) })),
       }).label);
     } else if (kind === "preset") {
-      const current = preset || { name: "Custom style", wmdFormatting: "@style", font: "", size: "", shortcut: "", block: "paragraph", level: "", bold: false, italic: false, underline: false, strike: false, highlight: false, calloutType: "note", calloutTitle: "", calloutIcon: "", calloutBackground: "", calloutBorder: "", calloutText: "", calloutTitleColor: "", calloutRadius: "" };
+      const current = preset || { name: "Custom style", wmdFormatting: "@style", font: "", size: "", shortcut: "", block: "paragraph", level: "", bold: false, italic: false, underline: false, strike: false, highlight: false, calloutType: "note", calloutTitle: "", calloutIcon: "", calloutBackground: "", calloutBorder: "", calloutText: "", calloutTitleColor: "", calloutRadius: "", default: false };
       insertFields.append(addInsertField("Style name", "presetName", { value: current.name, required: true }).label);
       insertFields.append(addInsertField("WMD formatting", "presetWmdFormatting", { value: current.wmdFormatting || "@style", placeholder: "e.g. #, ##, @title, @style, -, 1., - [ ], !warning" }).label);
       insertFields.append(addInsertField("Font family", "presetFont", { value: current.font, placeholder: "Inherit document font" }).label);
@@ -2513,6 +2808,7 @@
       block.control.addEventListener("change", toggleAllPresetFields);
       toggleAllPresetFields();
       insertFields.append(block.label, level.label, ...calloutFields);
+      insertFields.append(addInsertCheckbox("Default after heading Enter", "presetDefault", current.default).label);
       insertFields.append(addInsertCheckbox("Bold", "presetBold", current.bold).label, addInsertCheckbox("Italic", "presetItalic", current.italic).label, addInsertCheckbox("Underline", "presetUnderline", current.underline).label, addInsertCheckbox("Strikethrough", "presetStrike", current.strike).label, addInsertCheckbox("Highlight", "presetHighlight", current.highlight).label);
     }
     insertDialog.showModal();
@@ -2573,6 +2869,7 @@
       calloutText: String(form.get("presetCalloutText") || "").trim(),
       calloutTitleColor: String(form.get("presetCalloutTitleColor") || "").trim(),
       calloutRadius: String(form.get("presetCalloutRadius") || "").trim(),
+      default: form.get("presetDefault") === "on",
       bold: form.get("presetBold") === "on",
       italic: form.get("presetItalic") === "on",
       underline: form.get("presetUnderline") === "on",
@@ -3339,11 +3636,11 @@
       const command = button.dataset.command;
       if (command === "undo" || command === "redo") {
         applyHistory(command);
-      } else if (updateActivePresetFormatting(command)) {
-        return;
       } else if (state.mode === "document") {
         if (command === "highlight") sendCanvasCommand("highlight");
         else sendCanvasCommand(command);
+      } else if (updateActivePresetFormatting(command)) {
+        return;
       } else if (command === "bold") wrapRaw("*");
       else if (command === "italic") wrapRaw("_");
       else if (command === "underline") wrapRaw("++");

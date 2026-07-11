@@ -21,7 +21,7 @@ const DATA_ROOT = path.join(WEB_ROOT, "data");
 const DOCUMENT_ID_PATTERN = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 const DEFAULT_DOCUMENT_SOURCE = [
   "@config",
-  "Normal Text: {wmd-formatting: ; keybind: ctrl+shift+0; size: 16px; font: arial};",
+  "Normal Text: {wmd-formatting: ; keybind: ctrl+shift+0; size: 16px; font: arial; default: true};",
   "Title: {wmd-formatting: @title; keybind: ctrl+shift+`; size: 45px; font: arial};",
   "Heading 1: {wmd-formatting: #; keybind: ctrl+shift+1; size: 38px; font: arial; bold: true};",
   "Heading 2: {wmd-formatting: ##; keybind: ctrl+shift+2; size: 28px; font: arial; bold: true};",
