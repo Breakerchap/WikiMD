@@ -158,3 +158,26 @@ $ Alpha
   assert.match(result.html, /\[data-wmd-preset="heading-a"\]\{[^}]*font-size:80px/);
   assert.match(result.html, /\[data-wmd-preset="heading-b"\]\{[^}]*font-family:garamond/);
 });
+
+test("custom callout config colours compile without leaking heading marker styles into body", () => {
+  const result = compile(`@config
+Heading A: {wmd-formatting: $; keybind: ctrl+shift+a; size: 80px; font: arial; bold: true; italic: true};
+Boss Box: {wmd-formatting: !boss; keybind: ctrl+alt+b; callout-title: Boss; callout-bg: #111827; callout-border: #ef4444; callout-text: #f9fafb; callout-title-color: #fecaca; callout-icon: ⚔; callout-radius: 14px};
+@endconfig
+
+@tab Test
+$ Alpha
+!boss
+Watch out
+!end`);
+
+  assert.match(result.html, /<div class="callout callout-boss">/);
+  assert.match(result.html, /<div class="callout-title">Boss<\/div>/);
+  assert.match(result.html, /background:#111827/);
+  assert.match(result.html, /border-left-color:#ef4444/);
+  assert.match(result.html, /color:#f9fafb/);
+  assert.match(result.html, /border-radius:14px/);
+  assert.match(result.html, /content:"⚔"/);
+  assert.match(result.html, /<p>Watch out<\/p>/);
+  assert.doesNotMatch(result.html, /wmd-preset-heading-a[^>]*>Watch out/);
+});

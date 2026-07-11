@@ -238,8 +238,8 @@
     if (/^(?:-|\*|\+)\s*\[\s?\]$/.test(lower) || /^(?:-|\*|\+)\s*\[[x ]\]$/.test(lower) || lower === "checklist") return { ...base, block: "checklist" };
     if (["-", "*", "+", "unordered-list", "bullet-list"].includes(lower)) return { ...base, block: "bullet-list" };
     if (["1.", "1", "ordered-list", "numbered-list"].includes(lower)) return { ...base, block: "numbered-list" };
-    const callout = lower.match(/^!(note|tip|info|warning|danger|rule|example)$/);
-    if (callout) return { ...base, block: "callout", calloutType: callout[1] };
+    const callout = lower.match(/^!([a-z][\w-]*)$/);
+    if (callout && callout[1] !== "end") return { ...base, block: "callout", calloutType: callout[1] };
     const headingLike = /^heading\b/i.test(String(name || ""));
     return { ...base, block: headingLike ? "heading" : "paragraph", level: headingLike ? 2 : "", customMarker: true };
   }
@@ -299,6 +299,19 @@
     return String(value || "").replace(/[;{}<>]/g, "").trim().slice(0, 120);
   }
 
+  function normalizeCssValue(value) {
+    return String(value || "").replace(/[;{}<>]/g, "").trim().slice(0, 160);
+  }
+
+  function normalizeTextValue(value) {
+    return String(value || "").replace(/[<>]/g, "").trim().slice(0, 120);
+  }
+
+  function normalizeIdentifier(value, fallback = "note") {
+    const text = String(value || "").trim().toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "");
+    return text && text !== "end" ? text.slice(0, 48) : fallback;
+  }
+
   function normalizePresetBlock(value, fallback = "keep") {
     return ["keep", "paragraph", "heading", "bullet-list", "numbered-list", "checklist", "callout"].includes(value) ? value : fallback;
   }
@@ -344,7 +357,14 @@
       heading: block === "heading" || block === "title",
       level,
       shortcut: normalizeShortcut(prop("keybind") ?? prop("shortcut") ?? fallback.shortcut),
-      calloutType,
+      calloutType: normalizeIdentifier(prop("callout-type") ?? prop("calloutType") ?? fallback.calloutType ?? calloutType, calloutType),
+      calloutTitle: normalizeTextValue(prop("callout-title") ?? prop("calloutTitle") ?? fallback.calloutTitle),
+      calloutIcon: normalizeTextValue(prop("callout-icon") ?? prop("icon") ?? fallback.calloutIcon),
+      calloutBackground: normalizeCssValue(prop("callout-bg") ?? prop("callout-background") ?? prop("background") ?? prop("background-color") ?? prop("background-colour") ?? fallback.calloutBackground),
+      calloutBorder: normalizeCssValue(prop("callout-border") ?? prop("border") ?? prop("border-color") ?? prop("border-colour") ?? prop("accent") ?? prop("accent-color") ?? prop("accent-colour") ?? fallback.calloutBorder),
+      calloutText: normalizeCssValue(prop("callout-text") ?? prop("text") ?? prop("text-color") ?? prop("text-colour") ?? fallback.calloutText),
+      calloutTitleColor: normalizeCssValue(prop("callout-title-color") ?? prop("callout-title-colour") ?? prop("title-color") ?? prop("title-colour") ?? fallback.calloutTitleColor),
+      calloutRadius: normalizeCssValue(prop("callout-radius") ?? prop("radius") ?? prop("border-radius") ?? fallback.calloutRadius),
       builtin: false,
     };
   }
@@ -356,7 +376,7 @@
 
   function fallbackPresetFor(source, index = 0) {
     const id = normalizePresetId(source && (source.id || source.name), `custom-style-${index + 1}`);
-    return { id, name: source?.name || "Custom style", wmdFormatting: "@style", font: "", size: "", bold: false, italic: false, underline: false, strike: false, highlight: false, block: "paragraph", heading: false, level: "", shortcut: "", calloutType: "note", builtin: false };
+    return { id, name: source?.name || "Custom style", wmdFormatting: "@style", font: "", size: "", bold: false, italic: false, underline: false, strike: false, highlight: false, block: "paragraph", heading: false, level: "", shortcut: "", calloutType: "note", calloutTitle: "", calloutIcon: "", calloutBackground: "", calloutBorder: "", calloutText: "", calloutTitleColor: "", calloutRadius: "", builtin: false };
   }
 
   function normalizeStylePresetList(value) {
@@ -624,7 +644,12 @@
     if (preset.highlight) declarations.push("background:color-mix(in srgb, var(--warm) 50%, transparent)");
     if (preset.font) declarations.push(`font-family:${preset.font}`);
     if (preset.size) declarations.push(`font-size:${preset.size}`);
+    if (preset.calloutText) declarations.push(`color:${preset.calloutText}`);
     return declarations.join(";");
+  }
+
+  function cssString(value) {
+    return String(value || "").replace(/\\/g, "\\\\").replace(/"/g, '\\"');
   }
 
   function nativeStyleSelectors(preset) {
@@ -641,7 +666,21 @@
   }
 
   function stylePresetCss() {
-    return documentStylePresets().map((preset) => `${nativeStyleSelectors(preset).join(",")}{${presetStyleDeclarations(preset)}}`).join("");
+    return documentStylePresets().map((preset) => {
+      const selectors = nativeStyleSelectors(preset);
+      const blocks = [`${selectors.join(",")}{${presetStyleDeclarations(preset)}}`];
+      if (preset.block === "callout") {
+        const callout = [];
+        if (preset.calloutBackground) callout.push(`background:${preset.calloutBackground}`);
+        if (preset.calloutBorder) callout.push(`border-left-color:${preset.calloutBorder}`);
+        if (preset.calloutText) callout.push(`color:${preset.calloutText}`);
+        if (preset.calloutRadius) callout.push(`border-radius:${preset.calloutRadius}`);
+        if (callout.length) blocks.push(`${selectors.join(",")}{${callout.join(";")}}`);
+        if (preset.calloutTitleColor) blocks.push(`${selectors.map((selector) => `${selector} .callout-title`).join(",")}{color:${preset.calloutTitleColor}}`);
+        if (preset.calloutIcon) blocks.push(`${selectors.map((selector) => `${selector} .callout-title::before`).join(",")}{content:"${cssString(preset.calloutIcon)}";margin-right:.45em}`);
+      }
+      return blocks.join("");
+    }).join("");
   }
 
 
@@ -760,6 +799,14 @@
     add("underline", preset.underline ? "true" : "");
     add("strike", preset.strike ? "true" : "");
     add("highlight", preset.highlight ? "true" : "");
+    add("callout-type", preset.calloutType && preset.block === "callout" ? preset.calloutType : "");
+    add("callout-title", preset.calloutTitle || "");
+    add("callout-icon", preset.calloutIcon || "");
+    add("callout-bg", preset.calloutBackground || "");
+    add("callout-border", preset.calloutBorder || "");
+    add("callout-text", preset.calloutText || "");
+    add("callout-title-color", preset.calloutTitleColor || "");
+    add("callout-radius", preset.calloutRadius || "");
     const name = (preset.name || preset.id || "Custom Style").replace(/[\r\n:{};]/g, " ").replace(/\s+/g, " ").trim();
     return `${name}: {${props.join("; ")}};`;
   }
@@ -1681,10 +1728,10 @@
 
   function calloutHtml(value) {
     var options = value && typeof value === 'object' ? value : { type: value };
-    var type = String(options.type || 'note').toLowerCase();
-    if (['note', 'tip', 'info', 'warning', 'danger', 'rule', 'example'].indexOf(type) === -1) type = 'note';
-    var preset = /^[A-Za-z][\w-]*$/.test(options.preset || '') ? ' data-wmd-preset="' + options.preset + '" class="callout callout-' + type + ' wmd-preset-' + options.preset + '"' : ' class="callout callout-' + type + '"';
-    var title = type.charAt(0).toUpperCase() + type.slice(1);
+    var type = normalizeIdentifier(options.type || 'note', 'note');
+    var presetId = /^[A-Za-z][\w-]*$/.test(options.preset || '') ? options.preset : '';
+    var preset = presetId ? ' data-wmd-preset="' + presetId + '" class="callout callout-' + type + ' wmd-preset-' + presetId + '"' : ' class="callout callout-' + type + '"';
+    var title = escapeHtml(options.title || calloutLabel(type));
     return '<div' + preset + '><div class="callout-title">' + title + '</div><div class="callout-body"><p>Write the ' + type + ' here.</p></div></div><p><br></p>';
   }
 
@@ -1760,7 +1807,7 @@
       return;
     }
     if (blockKind === 'callout') {
-      document.execCommand('insertHTML', false, calloutHtml({ type: style.calloutType || 'note', preset: style.id || '' }));
+      document.execCommand('insertHTML', false, calloutHtml({ type: style.calloutType || 'note', preset: style.id || '', title: style.calloutTitle || style.name || '' }));
       notifyInput();
       return;
     }
@@ -2081,6 +2128,28 @@
     document.querySelector("#rawEditorShell").hidden = !visible;
   }
 
+  function configuredRawLineHighlight(line) {
+    const customPresets = documentStylePresets()
+      .filter((style) => wmdFormattingInfo(style.wmdFormatting, style.name).customMarker)
+      .sort((a, b) => String(b.wmdFormatting || "").length - String(a.wmdFormatting || "").length);
+
+    for (const style of customPresets) {
+      const marker = normalizeWmdFormatting(style.wmdFormatting);
+      if (!marker) continue;
+      const match = String(line || "").match(new RegExp(`^(\\s*)(${escapeRegExp(marker)})(?:\\s+|$)([\\s\\S]*)$`));
+      if (!match) continue;
+      const info = wmdFormattingInfo(marker, style.name);
+      const lead = escapeHtml(match[1]);
+      const mark = escapeHtml(match[2]);
+      const text = match[3] || "";
+      if (info.block === "heading") return `${lead}<span class="syntax-heading-mark">${mark}</span><span class="syntax-heading"> ${escapeHtml(text)}</span>`;
+      if (info.block === "callout") return `${lead}<span class="syntax-callout">${mark}${text ? ` ${escapeHtml(text)}` : ""}</span>`;
+      if (["bullet-list", "numbered-list", "checklist"].includes(info.block)) return `${lead}<span class="syntax-list">${mark}</span>${text ? ` ${inlineHighlight(text)}` : ""}`;
+      return `${lead}<span class="syntax-directive">${mark}</span>${text ? ` ${inlineHighlight(text)}` : ""}`;
+    }
+    return "";
+  }
+
   function renderHighlight() {
     const users = state.users.filter((user) => user.id !== state.clientId && user.selection && user.selection.mode === "wmd");
     let decorated = state.source;
@@ -2099,7 +2168,9 @@
       if (/^\s*@endconfig\b/.test(line)) { inConfig = false; return `<span class="syntax-directive">${escapeHtml(line)}</span>`; }
       if (inConfig) return highlightConfigLine(line);
       if (/^\s*@(tab|title|var|hidden|include|embed|toc|collapse|endcollapse|style|endstyle|end)\b/.test(line)) return `<span class="syntax-directive">${escapeHtml(line)}</span>`;
-      if (/^\s*!(note|tip|info|warning|danger|rule|example|end)\b/.test(line)) return `<span class="syntax-callout">${escapeHtml(line)}</span>`;
+      if (/^\s*![A-Za-z][\w-]*(?:\s|$)/.test(line) || /^\s*!end\b/.test(line)) return `<span class="syntax-callout">${escapeHtml(line)}</span>`;
+      const configured = configuredRawLineHighlight(line);
+      if (configured) return configured;
       const heading = line.match(/^(#{1,6})(\s+.*)$/);
       if (heading) return `<span class="syntax-heading-mark">${escapeHtml(heading[1])}</span><span class="syntax-heading">${escapeHtml(heading[2])}</span>`;
       if (/^\s*([-+*]|\d+\.)\s+/.test(line)) return `<span class="syntax-list">${inlineHighlight(line)}</span>`;
@@ -2373,12 +2444,15 @@
       dimensions.append(addInsertField("Columns", "columns", { type: "number", value: "3", min: 1, max: 20, required: true }).label);
       insertFields.append(dimensions);
     } else if (kind === "callout") {
-      insertFields.append(addInsertField("Callout type", "type", {
+      const configuredCallouts = documentStylePresets().filter((preset) => preset.block === "callout");
+      insertFields.append(addInsertField(configuredCallouts.length ? "Configured callout" : "Callout type", "type", {
         tagName: "select",
-        options: CALLOUT_TYPES.map((type) => ({ value: type, label: calloutLabel(type) })),
+        options: configuredCallouts.length
+          ? configuredCallouts.map((preset) => ({ value: `preset:${preset.id}`, label: preset.name }))
+          : CALLOUT_TYPES.map((type) => ({ value: type, label: calloutLabel(type) })),
       }).label);
     } else if (kind === "preset") {
-      const current = preset || { name: "Custom style", wmdFormatting: "@style", font: "", size: "", shortcut: "", block: "paragraph", level: "", bold: false, italic: false, underline: false, strike: false, highlight: false, calloutType: "note" };
+      const current = preset || { name: "Custom style", wmdFormatting: "@style", font: "", size: "", shortcut: "", block: "paragraph", level: "", bold: false, italic: false, underline: false, strike: false, highlight: false, calloutType: "note", calloutTitle: "", calloutIcon: "", calloutBackground: "", calloutBorder: "", calloutText: "", calloutTitleColor: "", calloutRadius: "" };
       insertFields.append(addInsertField("Style name", "presetName", { value: current.name, required: true }).label);
       insertFields.append(addInsertField("WMD formatting", "presetWmdFormatting", { value: current.wmdFormatting || "@style", placeholder: "e.g. #, ##, @title, @style, -, 1., - [ ], !warning" }).label);
       insertFields.append(addInsertField("Font family", "presetFont", { value: current.font, placeholder: "Inherit document font" }).label);
@@ -2417,18 +2491,28 @@
         options: [{ value: "", label: "Keep current level" }, ...[1, 2, 3, 4, 5, 6].map((value) => ({ value: String(value), label: `Heading ${value}` }))],
       });
       level.control.value = current.level ? String(current.level) : "";
-      const callout = addInsertField("Callout type", "presetCalloutType", {
-        tagName: "select",
-        options: CALLOUT_TYPES.map((type) => ({ value: type, label: calloutLabel(type) })),
-      });
-      callout.control.value = current.calloutType || "note";
+      const callout = addInsertField("Callout marker", "presetCalloutType", { value: current.calloutType || "note", placeholder: "warning, lore, boss, etc." });
       const togglePresetFields = () => {
         level.label.hidden = block.control.value !== "heading";
         callout.label.hidden = block.control.value !== "callout";
       };
       block.control.addEventListener("change", togglePresetFields);
       togglePresetFields();
-      insertFields.append(block.label, level.label, callout.label);
+      const calloutTitle = addInsertField("Callout title", "presetCalloutTitle", { value: current.calloutTitle || "", placeholder: "Optional title shown in the callout" });
+      const calloutIcon = addInsertField("Callout icon", "presetCalloutIcon", { value: current.calloutIcon || "", placeholder: "Optional emoji/icon" });
+      const calloutBg = addInsertField("Callout background", "presetCalloutBackground", { value: current.calloutBackground || "", placeholder: "e.g. #1f2937 or rgba(...)" });
+      const calloutBorder = addInsertField("Callout border/accent", "presetCalloutBorder", { value: current.calloutBorder || "", placeholder: "e.g. #f59e0b" });
+      const calloutText = addInsertField("Callout text colour", "presetCalloutText", { value: current.calloutText || "", placeholder: "e.g. #f8fafc" });
+      const calloutTitleColor = addInsertField("Callout title colour", "presetCalloutTitleColor", { value: current.calloutTitleColor || "", placeholder: "e.g. #fde68a" });
+      const calloutRadius = addInsertField("Callout radius", "presetCalloutRadius", { value: current.calloutRadius || "", placeholder: "e.g. 12px" });
+      const calloutFields = [callout.label, calloutTitle.label, calloutIcon.label, calloutBg.label, calloutBorder.label, calloutText.label, calloutTitleColor.label, calloutRadius.label];
+      const setCalloutHidden = () => calloutFields.forEach((field) => { field.hidden = block.control.value !== "callout"; });
+      const previousTogglePresetFields = togglePresetFields;
+      const toggleAllPresetFields = () => { previousTogglePresetFields(); setCalloutHidden(); };
+      block.control.removeEventListener("change", togglePresetFields);
+      block.control.addEventListener("change", toggleAllPresetFields);
+      toggleAllPresetFields();
+      insertFields.append(block.label, level.label, ...calloutFields);
       insertFields.append(addInsertCheckbox("Bold", "presetBold", current.bold).label, addInsertCheckbox("Italic", "presetItalic", current.italic).label, addInsertCheckbox("Underline", "presetUnderline", current.underline).label, addInsertCheckbox("Strikethrough", "presetStrike", current.strike).label, addInsertCheckbox("Highlight", "presetHighlight", current.highlight).label);
     }
     insertDialog.showModal();
@@ -2459,23 +2543,43 @@
       }
       return { rows, columns };
     }
-    if (kind === "callout") return String(form.get("type") || "note");
-    if (kind === "preset") return {
+    if (kind === "callout") {
+      const raw = String(form.get("type") || "note");
+      if (raw.startsWith("preset:")) {
+        const preset = stylePresetById(raw.slice("preset:".length));
+        if (preset) return { type: preset.calloutType || "note", preset: preset.id, title: preset.calloutTitle || preset.name || calloutLabel(preset.calloutType || "note") };
+      }
+      return { type: raw };
+    }
+    if (kind === "preset") {
+      const block = String(form.get("presetBlock") || "paragraph");
+      const calloutType = String(form.get("presetCalloutType") || "note").trim();
+      let wmdFormatting = String(form.get("presetWmdFormatting") || "@style").trim();
+      if (block === "callout" && (!wmdFormatting || wmdFormatting === "@style") && calloutType) wmdFormatting = `!${normalizeIdentifier(calloutType, "note")}`;
+      return {
       name: String(form.get("presetName") || "").trim(),
       font: String(form.get("presetFont") || "").trim(),
       size: String(form.get("presetSize") || "").trim(),
       shortcut: String(form.get("presetShortcut") || "").trim(),
-      wmdFormatting: String(form.get("presetWmdFormatting") || "@style").trim(),
+      wmdFormatting,
       block: String(form.get("presetBlock") || "paragraph"),
       heading: form.get("presetBlock") === "heading",
       level: String(form.get("presetLevel") || ""),
       calloutType: String(form.get("presetCalloutType") || "note"),
+      calloutTitle: String(form.get("presetCalloutTitle") || "").trim(),
+      calloutIcon: String(form.get("presetCalloutIcon") || "").trim(),
+      calloutBackground: String(form.get("presetCalloutBackground") || "").trim(),
+      calloutBorder: String(form.get("presetCalloutBorder") || "").trim(),
+      calloutText: String(form.get("presetCalloutText") || "").trim(),
+      calloutTitleColor: String(form.get("presetCalloutTitleColor") || "").trim(),
+      calloutRadius: String(form.get("presetCalloutRadius") || "").trim(),
       bold: form.get("presetBold") === "on",
       italic: form.get("presetItalic") === "on",
       underline: form.get("presetUnderline") === "on",
       strike: form.get("presetStrike") === "on",
       highlight: form.get("presetHighlight") === "on",
-    };
+      };
+    }
     return null;
   }
 
@@ -2502,8 +2606,10 @@
 
   function insertRaw(kind, value) {
     if (kind === "callout") {
-      const type = CALLOUT_TYPES.includes(value) ? value : "note";
-      const title = calloutLabel(type);
+      const options = value && typeof value === "object" ? value : { type: value };
+      const preset = options.preset ? stylePresetById(options.preset) : null;
+      const type = normalizeIdentifier(options.type || preset?.calloutType || "note", "note");
+      const title = options.title || preset?.calloutTitle || preset?.name || calloutLabel(type);
       const body = `Write the ${type} here.`;
       const text = `\n!${type} ${title}\n${body}\n!end\n`;
       const start = editor.selectionStart;
@@ -2595,7 +2701,7 @@
     if (info.block === "bullet-list") return `- ${label}`;
     if (info.block === "numbered-list") return `1. ${label}`;
     if (info.block === "checklist") return `- [ ] ${label}`;
-    if (info.block === "callout") return `!${info.calloutType || "note"} ${preset?.name || "Note"}\n${label}\n!end`;
+    if (info.block === "callout") return `!${info.calloutType || "note"} ${preset?.calloutTitle || preset?.name || calloutLabel(info.calloutType || "note")}\n${label}\n!end`;
     return label;
   }
 

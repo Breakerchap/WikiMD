@@ -283,18 +283,16 @@ function highlightPlugin(md) {
 }
 
 function calloutPlugin(md) {
-  const allowed = new Set(["note", "tip", "info", "warning", "danger", "rule", "example"]);
-
   md.block.ruler.before("paragraph", "wmd_callout", (state, startLine, endLine, silent) => {
     const start = state.bMarks[startLine] + state.tShift[startLine];
     const max = state.eMarks[startLine];
     const line = state.src.slice(start, max).trim();
-    const match = line.match(/^!(\w+)(?:\s+(.*))?$/);
+    const match = line.match(/^!([A-Za-z][\w-]*)(?:\s+(.*))?$/);
 
     if (!match) return false;
 
     const type = match[1].toLowerCase();
-    if (!allowed.has(type)) return false;
+    if (type === "end") return false;
 
     let nextLine = startLine + 1;
     const contentLines = [];
@@ -316,12 +314,19 @@ function calloutPlugin(md) {
     const open = state.push("wmd_callout_open", "div", 1);
     open.block = true;
     open.map = [startLine, nextLine + 1];
+    const calloutPreset = Object.values(state.env && state.env.stylePresets || {})
+      .find((preset) => preset && preset.block === "callout" && preset.calloutType === type);
+
     open.meta = {
       type,
-      title: (match[2] || niceLabel(type)).trim(),
+      title: (match[2] || calloutPreset && (calloutPreset.calloutTitle || calloutPreset.name) || niceLabel(type)).trim(),
     };
 
+    const nestedStart = state.tokens.length;
     state.md.block.parse(contentLines.join("\n"), state.md, state.env, state.tokens);
+    for (const token of state.tokens.slice(nestedStart)) {
+      if (token.map) token.map = [token.map[0] + startLine + 1, token.map[1] + startLine + 1];
+    }
 
     state.push("wmd_callout_close", "div", -1);
     state.line = nextLine + 1;
@@ -520,8 +525,8 @@ function wmdFormattingInfo(value, name = "") {
   if (/^(?:-|\*|\+)\s*\[\s?\]$/.test(lower) || /^(?:-|\*|\+)\s*\[[x ]\]$/.test(lower) || lower === "checklist") return { ...base, block: "checklist" };
   if (["-", "*", "+", "unordered-list", "bullet-list"].includes(lower)) return { ...base, block: "bullet-list" };
   if (["1.", "1", "ordered-list", "numbered-list"].includes(lower)) return { ...base, block: "numbered-list" };
-  const callout = lower.match(/^!(note|tip|info|warning|danger|rule|example)$/);
-  if (callout) return { ...base, block: "callout", calloutType: callout[1] };
+  const callout = lower.match(/^!([a-z][\w-]*)$/);
+  if (callout && callout[1] !== "end") return { ...base, block: "callout", calloutType: callout[1] };
   const headingLike = /^heading\b/i.test(String(name || ""));
   return { ...base, block: headingLike ? "heading" : "paragraph", level: headingLike ? 2 : "", customMarker: true };
 }
@@ -550,12 +555,28 @@ function normalizeStylePreset(value) {
     heading: info.block === "heading" || info.block === "title",
     level: info.level,
     shortcut: String(prop("keybind") ?? prop("shortcut") ?? "").trim().slice(0, 40),
-    calloutType: info.calloutType,
+    calloutType: sanitizeIdentifier(prop("callout-type") ?? prop("calloutType") ?? info.calloutType, info.calloutType),
+    calloutTitle: sanitizeTextValue(prop("callout-title") ?? prop("calloutTitle")),
+    calloutIcon: sanitizeTextValue(prop("callout-icon") ?? prop("icon")),
+    calloutBackground: sanitizeCssValue(prop("callout-bg") ?? prop("callout-background") ?? prop("background") ?? prop("background-color") ?? prop("background-colour")),
+    calloutBorder: sanitizeCssValue(prop("callout-border") ?? prop("border") ?? prop("border-color") ?? prop("border-colour") ?? prop("accent") ?? prop("accent-color") ?? prop("accent-colour")),
+    calloutText: sanitizeCssValue(prop("callout-text") ?? prop("text") ?? prop("text-color") ?? prop("text-colour")),
+    calloutTitleColor: sanitizeCssValue(prop("callout-title-color") ?? prop("callout-title-colour") ?? prop("title-color") ?? prop("title-colour")),
+    calloutRadius: sanitizeCssValue(prop("callout-radius") ?? prop("radius") ?? prop("border-radius")),
   };
 }
 
 function sanitizeCssValue(value) {
   return String(value || "").replace(/[;{}<>]/g, "").trim().slice(0, 160);
+}
+
+function sanitizeTextValue(value) {
+  return String(value || "").replace(/[<>]/g, "").trim().slice(0, 120);
+}
+
+function sanitizeIdentifier(value, fallback = "note") {
+  const text = String(value || "").trim().toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "");
+  return text && text !== "end" ? text.slice(0, 48) : fallback;
 }
 
 function nativeStyleSelectors(preset) {
@@ -581,8 +602,25 @@ function stylePresetCss(stylePresets) {
     if (preset.highlight) declarations.push("background:rgba(255,220,120,.32)");
     if (preset.font) declarations.push(`font-family:${preset.font}`);
     if (preset.size) declarations.push(`font-size:${preset.size}`);
-    return `${nativeStyleSelectors(preset).join(",")}{${declarations.join(";")}}`;
+    if (preset.calloutText) declarations.push(`color:${preset.calloutText}`);
+
+    const blocks = [`${nativeStyleSelectors(preset).join(",")}{${declarations.join(";")}}`];
+    if (preset.block === "callout") {
+      const callout = [];
+      if (preset.calloutBackground) callout.push(`background:${preset.calloutBackground}`);
+      if (preset.calloutBorder) callout.push(`border-left-color:${preset.calloutBorder}`);
+      if (preset.calloutText) callout.push(`color:${preset.calloutText}`);
+      if (preset.calloutRadius) callout.push(`border-radius:${preset.calloutRadius}`);
+      if (callout.length) blocks.push(`${nativeStyleSelectors(preset).join(",")}{${callout.join(";")}}`);
+      if (preset.calloutTitleColor) blocks.push(`${nativeStyleSelectors(preset).map((selector) => `${selector} .callout-title`).join(",")}{color:${preset.calloutTitleColor}}`);
+      if (preset.calloutIcon) blocks.push(`${nativeStyleSelectors(preset).map((selector) => `${selector} .callout-title::before`).join(",")}{content:"${cssString(preset.calloutIcon)}";margin-right:.45em}`);
+    }
+    return blocks.join("\n  ");
   }).join("\n  ");
+}
+
+function cssString(value) {
+  return String(value || "").replace(/\\/g, "\\\\").replace(/"/g, '\\"');
 }
 
 
@@ -1063,6 +1101,7 @@ function buildHtml(config, tabs, warnings) {
         currentTabName: tab.name,
         currentTabSlug: tab.refSlug,
         currentTabHeadings: tab.headings,
+        stylePresets: config.stylePresets,
       }, config);
 
       const titleHtml = tab.title
