@@ -202,30 +202,6 @@ function applyOperation(source, operation) {
   return output;
 }
 
-function mapOffsetThroughOperation(offset, operation) {
-  const sourceOffset = Math.max(0, Number(offset) || 0);
-  let consumed = 0;
-  let produced = 0;
-
-  for (const part of normalizeOperations(operation && operation.ops)) {
-    if (typeof part === "string") {
-      produced += part.length;
-      continue;
-    }
-    if (part > 0) {
-      if (sourceOffset <= consumed + part) return produced + Math.max(0, sourceOffset - consumed);
-      consumed += part;
-      produced += part;
-      continue;
-    }
-    const removed = -part;
-    if (sourceOffset <= consumed + removed) return produced;
-    consumed += removed;
-  }
-
-  return produced + Math.max(0, sourceOffset - consumed);
-}
-
 function appendOperation(target, part) {
   if (part === 0 || part === "") return;
   const previous = target[target.length - 1];
@@ -352,18 +328,6 @@ function broadcastPresence(documentId) {
   broadcast(documentId, { type: "presence", users: getPresence(documentId) });
 }
 
-function broadcastSelection(client) {
-  broadcast(client.documentId, {
-    type: "selection",
-    user: {
-      id: client.clientId || client.id,
-      name: client.name,
-      color: client.color,
-      selection: client.selection || null,
-    },
-  });
-}
-
 function handleClientMessage(client, message) {
   if (!message || typeof message.type !== "string") return;
 
@@ -416,15 +380,6 @@ function handleClientMessage(client, message) {
       document.source = nextSource;
       document.revision += 1;
       document.updatedAt = new Date().toISOString();
-      // Source-mode cursors use WMD offsets, so keep them attached to their text as edits arrive.
-      for (const collaborator of documentClients(document.id)) {
-        if (!collaborator.selection || collaborator.selection.mode !== "wmd") continue;
-        collaborator.selection = {
-          ...collaborator.selection,
-          start: mapOffsetThroughOperation(collaborator.selection.start, operation),
-          end: mapOffsetThroughOperation(collaborator.selection.end, operation),
-        };
-      }
       const historyEntry = { revision: document.revision, operation, bytes: operationByteLength(operation) };
       document.history.push(historyEntry);
       document.historyBytes += historyEntry.bytes;
@@ -450,14 +405,12 @@ function handleClientMessage(client, message) {
     const start = Number(message.start);
     const end = Number(message.end);
     if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end < 0) return;
-    const mode = message.mode === "canvas" ? "canvas" : "wmd";
-    const document = mode === "wmd" ? readDocument(client.documentId) : null;
     client.selection = {
-      start: document ? Math.min(start, document.source.length) : start,
-      end: document ? Math.min(end, document.source.length) : end,
-      mode,
+      start,
+      end,
+      mode: message.mode === "canvas" ? "canvas" : "wmd",
     };
-    broadcastSelection(client);
+    broadcastPresence(client.documentId);
     return;
   }
 
@@ -932,6 +885,5 @@ module.exports = {
   docxToWmd,
   normalizeDocumentId,
   parseOptions,
-  mapOffsetThroughOperation,
   transformOperations,
 };
