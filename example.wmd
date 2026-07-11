@@ -1,15 +1,11 @@
 @config
-font: Arial, sans-serif
-monoFont: Consolas, monospace
-baseSize: 16px
-titleSize: 3rem
-h1Size: 2rem
-h2Size: 1.5rem
-h3Size: 1.25rem
-lineHeight: 1.6
-contentWidth: 900px
+Normal Text: {wmd-formatting: ; keybind: ctrl+shift+0; size: 16px; font: arial};
+Title: {wmd-formatting: @title; keybind: ctrl+shift+`; size: 45px; font: arial};
+Heading 1: {wmd-formatting: #; keybind: ctrl+shift+1; size: 38px; font: arial; bold: true};
+Heading 2: {wmd-formatting: ##; keybind: ctrl+shift+2; size: 28px; font: arial; bold: true};
+Heading 3: {wmd-formatting: ###; keybind: ctrl+shift+3; size: 22px; font: arial; bold: true};
+Heading 4: {wmd-formatting: ####; keybind: ctrl+shift+4; size: 18px; font: arial; bold: false; italic: true};
 @endconfig
-
 @var systemName = WMD
 @var damageFormula = Weapon + Stat + Margin - Armour
 

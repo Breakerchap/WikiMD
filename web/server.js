@@ -19,6 +19,22 @@ const WEB_ROOT = __dirname;
 const PUBLIC_ROOT = path.join(WEB_ROOT, "public");
 const DATA_ROOT = path.join(WEB_ROOT, "data");
 const DOCUMENT_ID_PATTERN = /^[a-z0-9][a-z0-9_-]{0,63}$/;
+const DEFAULT_DOCUMENT_SOURCE = [
+  "@config",
+  "Normal Text: {wmd-formatting: ; keybind: ctrl+shift+0; size: 16px; font: arial};",
+  "Title: {wmd-formatting: @title; keybind: ctrl+shift+`; size: 45px; font: arial};",
+  "Heading 1: {wmd-formatting: #; keybind: ctrl+shift+1; size: 38px; font: arial; bold: true};",
+  "Heading 2: {wmd-formatting: ##; keybind: ctrl+shift+2; size: 28px; font: arial; bold: true};",
+  "Heading 3: {wmd-formatting: ###; keybind: ctrl+shift+3; size: 22px; font: arial; bold: true};",
+  "Heading 4: {wmd-formatting: ####; keybind: ctrl+shift+4; size: 18px; font: arial; bold: false; italic: true};",
+  "@endconfig",
+  "",
+  "@tab Test",
+  "@title Home",
+  "",
+  "# Home",
+  "",
+].join("\n");
 const clients = new Set();
 const documents = new Map();
 const CORS_HEADERS = {
@@ -49,11 +65,8 @@ function titleFromSource(source, fallback) {
 }
 
 function createStarterDocument(id) {
-  const title = id === "untitled"
-    ? "Untitled WMD document"
-    : id.replace(/[-_]+/g, " ");
-
-  return `@tab Home\n@title ${title}\n\nStart writing in **WMD**. Share this page URL to edit it together.\n\n!note Live preview\nYour collaborators see edits, cursors, and the compiled document in real time.\n!end\n`;
+  void id;
+  return DEFAULT_DOCUMENT_SOURCE;
 }
 
 function documentFilePath(id) {
@@ -664,20 +677,81 @@ function docxToWmd(buffer, title = "Imported document") {
   return `@tab Home\n@title ${safeTitle}\n\n${lines.join("\n\n") || "# Imported document\n"}\n`;
 }
 
+function documentSummaryFromSource(id, source, updatedAt = new Date().toISOString()) {
+  return { id, title: titleFromSource(source, id), updatedAt };
+}
+
 function listDocuments() {
   fs.mkdirSync(DATA_ROOT, { recursive: true });
   const savedDocuments = fs.readdirSync(DATA_ROOT)
     .filter((fileName) => fileName.endsWith(".wmd"))
     .map((fileName) => {
       const id = fileName.slice(0, -4);
-      const source = fs.readFileSync(path.join(DATA_ROOT, fileName), "utf8");
-      return { id, title: titleFromSource(source, id) };
+      const filePath = path.join(DATA_ROOT, fileName);
+      const source = fs.readFileSync(filePath, "utf8");
+      const stats = fs.statSync(filePath);
+      return documentSummaryFromSource(id, source, stats.mtime.toISOString());
     });
   const loadedOnly = [...documents.values()]
     .filter((document) => !savedDocuments.some((item) => item.id === document.id))
-    .map((document) => ({ id: document.id, title: titleFromSource(document.source, document.id) }));
+    .map((document) => documentSummaryFromSource(document.id, document.source, document.updatedAt));
 
-  return [...savedDocuments, ...loadedOnly].sort((left, right) => left.title.localeCompare(right.title));
+  return [...savedDocuments, ...loadedOnly].sort((left, right) => {
+    const updatedOrder = String(right.updatedAt || "").localeCompare(String(left.updatedAt || ""));
+    return updatedOrder || left.title.localeCompare(right.title);
+  });
+}
+
+function createDocument(payload = {}) {
+  const requestedId = normalizeDocumentId(payload.id || payload.title || "untitled");
+  const id = requestedId === "untitled" && (payload.id || payload.title) ? normalizeDocumentId(`${payload.id || payload.title}-${Date.now().toString(36)}`) : requestedId;
+  const filePath = documentFilePath(id);
+  fs.mkdirSync(DATA_ROOT, { recursive: true });
+  if (fs.existsSync(filePath) || documents.has(id)) {
+    const error = new Error(`A document called ${id} already exists.`);
+    error.statusCode = 409;
+    throw error;
+  }
+  const source = createStarterDocument(id);
+  const document = {
+    id,
+    source,
+    revision: 0,
+    history: [],
+    historyBytes: 0,
+    updatedAt: new Date().toISOString(),
+    saveTimer: null,
+  };
+  documents.set(id, document);
+  persistDocument(document);
+  return documentSummaryFromSource(id, source, document.updatedAt);
+}
+
+function deleteDocument(id) {
+  const normalizedId = normalizeDocumentId(id);
+  if (normalizedId === "untitled") {
+    const error = new Error("The fallback untitled document cannot be deleted.");
+    error.statusCode = 400;
+    throw error;
+  }
+  if (documentClients(normalizedId).length) {
+    const error = new Error("Close this document before deleting it.");
+    error.statusCode = 409;
+    throw error;
+  }
+  const document = documents.get(normalizedId);
+  if (document) {
+    clearTimeout(document.saveTimer);
+    documents.delete(normalizedId);
+  }
+  const filePath = documentFilePath(normalizedId);
+  if (!fs.existsSync(filePath)) {
+    const error = new Error("Document not found.");
+    error.statusCode = 404;
+    throw error;
+  }
+  fs.unlinkSync(filePath);
+  return { id: normalizedId };
 }
 
 async function handleRequest(request, response) {
@@ -691,6 +765,18 @@ async function handleRequest(request, response) {
     }
     if (request.method === "GET" && url.pathname === "/api/documents") {
       sendJson(response, 200, { documents: listDocuments() });
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/documents") {
+      const payload = JSON.parse((await readRequestBody(request)).toString("utf8") || "{}");
+      sendJson(response, 201, { document: createDocument(payload) });
+      return;
+    }
+
+    const deleteMatch = url.pathname.match(/^\/api\/documents\/([^/]+)$/);
+    if (request.method === "DELETE" && deleteMatch) {
+      sendJson(response, 200, { document: deleteDocument(decodeURIComponent(deleteMatch[1])) });
       return;
     }
 
@@ -716,7 +802,7 @@ async function handleRequest(request, response) {
 
     serveStatic(request, response, url.pathname);
   } catch (error) {
-    sendJson(response, 400, { error: error.message || "Something went wrong." });
+    sendJson(response, Number(error.statusCode) || 400, { error: error.message || "Something went wrong." });
   }
 }
 
@@ -795,6 +881,7 @@ if (require.main === module) {
 module.exports = {
   applyOperation,
   createStarterDocument,
+  DEFAULT_DOCUMENT_SOURCE,
   docxToWmd,
   normalizeDocumentId,
   parseOptions,

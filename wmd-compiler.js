@@ -25,6 +25,9 @@ function escapeHtml(value) {
     .replace(/'/g, "&#39;");
 }
 
+function escapeRegExp(value) {
+  return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
 function niceLabel(value) {
   const text = String(value || "").trim();
   if (!text) return "";
@@ -326,11 +329,16 @@ function calloutPlugin(md) {
   });
 
   md.renderer.rules.wmd_callout_open = (tokens, idx) => {
-    const meta = tokens[idx].meta || {};
+    const token = tokens[idx];
+    const meta = token.meta || {};
     const type = meta.type || "note";
     const title = meta.title || niceLabel(type);
+    const attrs = new Map(token.attrs || []);
+    const extraClass = attrs.get("class") || "";
+    attrs.delete("class");
+    const extraAttrs = [...attrs.entries()].map(([name, value]) => ` ${escapeHtml(name)}="${escapeHtml(value)}"`).join("");
 
-    return `<div class="callout callout-${escapeHtml(type)}">\n<div class="callout-title">${escapeHtml(title)}</div>\n<div class="callout-body">\n`;
+    return `<div class="callout callout-${escapeHtml(type)}${extraClass ? ` ${escapeHtml(extraClass)}` : ""}"${extraAttrs}>\n<div class="callout-title">${escapeHtml(title)}</div>\n<div class="callout-body">\n`;
   };
 
   md.renderer.rules.wmd_callout_close = () => {
@@ -430,14 +438,153 @@ function tocPlugin(md) {
   };
 }
 
-function parseConfigLine(line, config) {
-  const [key, ...valueParts] = line.split(":");
-  const value = valueParts.join(":").trim();
+function normalizeStyleName(value) {
+  const text = String(value || "").trim();
+  const lower = text.toLowerCase().replace(/[_-]+/g, " ").replace(/\s+/g, " ");
+  if (lower === "title") return "title";
+  if (lower === "normal" || lower === "normal text" || lower === "paragraph") return "normal-text";
+  const heading = lower.match(/^heading\s*([1-6])$/);
+  if (heading) return `heading-${heading[1]}`;
+  return lower.replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 48);
+}
 
-  if (key && value && key.trim() in config) {
-    config[key.trim()] = value;
+function normalizeConfigPropertyName(value) {
+  return String(value || "").trim().toLowerCase().replace(/[\s_]+/g, "-");
+}
+
+function parseConfigValue(value) {
+  const text = String(value || "").trim();
+  if ((text.startsWith('"') && text.endsWith('"')) || (text.startsWith("'") && text.endsWith("'"))) {
+    return text.slice(1, -1);
+  }
+  return text;
+}
+
+function parseStyleBoolean(value) {
+  const text = String(value || "").trim().toLowerCase();
+  if (["true", "yes", "on", "1"].includes(text)) return true;
+  if (["false", "no", "off", "0"].includes(text)) return false;
+  return Boolean(text);
+}
+
+function parseStylePropertyBlock(rawValue) {
+  let body = String(rawValue || "").trim().replace(/;\s*$/, "").trim();
+  if (!body.startsWith("{") || !body.endsWith("}")) return null;
+  body = body.slice(1, -1).trim();
+  const props = {};
+  for (const part of body.split(";")) {
+    const trimmed = part.trim();
+    if (!trimmed) continue;
+    const match = trimmed.match(/^([A-Za-z][\w-]*)\s*:\s*([\s\S]*)$/);
+    if (!match) continue;
+    props[normalizeConfigPropertyName(match[1])] = parseConfigValue(match[2]);
+  }
+  return props;
+}
+
+function parseConfigLine(line, config) {
+  const trimmed = String(line || "").trim();
+  if (!trimmed || trimmed.startsWith("//")) return;
+
+  const match = trimmed.match(/^([^:]+?)\s*:\s*([\s\S]+?)\s*;?\s*$/);
+  if (!match) return;
+
+  const cleanKey = match[1].trim();
+  const rawValue = match[2].trim();
+  const styleProps = parseStylePropertyBlock(rawValue);
+
+  if (styleProps) {
+    const preset = normalizeStylePreset({ name: cleanKey, id: normalizeStyleName(cleanKey), ...styleProps });
+    if (preset) config.stylePresets[preset.id] = preset;
+    return;
+  }
+
+  if (cleanKey in config) {
+    config[cleanKey] = parseConfigValue(rawValue.replace(/;\s*$/, ""));
   }
 }
+
+function normalizeWmdFormatting(value) {
+  return String(value ?? "").trim();
+}
+
+function wmdFormattingInfo(value, name = "") {
+  const formatting = normalizeWmdFormatting(value);
+  const lower = formatting.toLowerCase();
+  const heading = formatting.match(/^(#{1,6})$/);
+  const base = { formatting, block: "paragraph", level: "", calloutType: "note", wrapsStyle: false, customMarker: false };
+  if (!formatting) return base;
+  if (lower === "@title") return { ...base, block: "title", level: 1 };
+  if (lower === "@style") return { ...base, wrapsStyle: true };
+  if (heading) return { ...base, block: "heading", level: heading[1].length };
+  if (/^(?:-|\*|\+)\s*\[\s?\]$/.test(lower) || /^(?:-|\*|\+)\s*\[[x ]\]$/.test(lower) || lower === "checklist") return { ...base, block: "checklist" };
+  if (["-", "*", "+", "unordered-list", "bullet-list"].includes(lower)) return { ...base, block: "bullet-list" };
+  if (["1.", "1", "ordered-list", "numbered-list"].includes(lower)) return { ...base, block: "numbered-list" };
+  const callout = lower.match(/^!(note|tip|info|warning|danger|rule|example)$/);
+  if (callout) return { ...base, block: "callout", calloutType: callout[1] };
+  const headingLike = /^heading\b/i.test(String(name || ""));
+  return { ...base, block: headingLike ? "heading" : "paragraph", level: headingLike ? 2 : "", customMarker: true };
+}
+
+function normalizeStylePreset(value) {
+  const preset = value && typeof value === "object" ? value : {};
+  const id = normalizeStyleName(preset.id || preset.name);
+  if (!id) return null;
+
+  const prop = (name) => preset[name] ?? preset[normalizeConfigPropertyName(name)];
+  const wmdFormatting = normalizeWmdFormatting(prop("wmd-formatting") ?? prop("wmdFormatting") ?? "@style");
+  const info = wmdFormattingInfo(wmdFormatting, preset.name || preset.id);
+
+  return {
+    id,
+    name: String(preset.name || id).trim().slice(0, 48) || id,
+    wmdFormatting,
+    font: sanitizeCssValue(prop("font")),
+    size: sanitizeCssValue(prop("size")),
+    bold: parseStyleBoolean(prop("bold")),
+    italic: parseStyleBoolean(prop("italic")),
+    underline: parseStyleBoolean(prop("underline")),
+    strike: parseStyleBoolean(prop("strike") ?? prop("strikethrough")),
+    highlight: parseStyleBoolean(prop("highlight")),
+    block: info.block,
+    heading: info.block === "heading" || info.block === "title",
+    level: info.level,
+    shortcut: String(prop("keybind") ?? prop("shortcut") ?? "").trim().slice(0, 40),
+    calloutType: info.calloutType,
+  };
+}
+
+function sanitizeCssValue(value) {
+  return String(value || "").replace(/[;{}<>]/g, "").trim().slice(0, 160);
+}
+
+function nativeStyleSelectors(preset) {
+  const info = wmdFormattingInfo(preset && preset.wmdFormatting || "", preset && preset.name || "");
+  const idSelector = `[data-wmd-preset="${escapeHtml(preset.id)}"]`;
+  if (info.wrapsStyle || info.customMarker) return [idSelector];
+  if (info.block === "title") return [".tab-title", idSelector];
+  if (info.block === "heading" && info.level) return [`.tab-section h${info.level}:not(.tab-title):not([data-wmd-preset])`, idSelector];
+  if (info.block === "paragraph") return [".tab-section p:not([data-wmd-preset])", idSelector];
+  if (info.block === "bullet-list" || info.block === "checklist") return [".tab-section ul:not([data-wmd-preset])", idSelector];
+  if (info.block === "numbered-list") return [".tab-section ol:not([data-wmd-preset])", idSelector];
+  if (info.block === "callout") return [`.tab-section .callout-${info.calloutType}:not([data-wmd-preset])`, idSelector];
+  return [idSelector];
+}
+
+function stylePresetCss(stylePresets) {
+  return Object.values(stylePresets || {}).map((preset) => {
+    const declarations = [
+      `font-weight:${preset.bold ? "700" : "400"}`,
+      `font-style:${preset.italic ? "italic" : "normal"}`,
+      `text-decoration-line:${[preset.underline ? "underline" : "", preset.strike ? "line-through" : ""].filter(Boolean).join(" ") || "none"}`,
+    ];
+    if (preset.highlight) declarations.push("background:rgba(255,220,120,.32)");
+    if (preset.font) declarations.push(`font-family:${preset.font}`);
+    if (preset.size) declarations.push(`font-size:${preset.size}`);
+    return `${nativeStyleSelectors(preset).join(",")}{${declarations.join(";")}}`;
+  }).join("\n  ");
+}
+
 
 function parseVarLine(line, vars) {
   const match = line.trim().match(/^@var\s+([A-Za-z][\w-]*)\s*(?:=|:)\s*(.+)$/);
@@ -493,6 +640,7 @@ function parseWmd(source) {
     h6Size: "0.9rem",
     lineHeight: "1.6",
     contentWidth: "900px",
+    stylePresets: {},
   };
 
   const vars = {};
@@ -606,8 +754,9 @@ function createUniqueId(baseId, counts) {
   return count === 1 ? baseId : `${baseId}-${count}`;
 }
 
-function collectHeadings(md, tab) {
-  const tokens = md.parse(tab.resolvedContent, {});
+function collectHeadings(md, tab, config) {
+  const prepared = prepareStyleMarkers(tab.resolvedContent, config.stylePresets);
+  const tokens = md.parse(prepared.markdown, {});
   const headings = [];
   const idCounts = new Map();
 
@@ -650,6 +799,68 @@ function applyHeadingIdsToTokens(tokens, headings) {
     if (heading) {
       token.attrSet("id", heading.id);
     }
+  }
+}
+
+function customMarkerPresets(stylePresets) {
+  return Object.values(stylePresets || {})
+    .filter((preset) => preset && wmdFormattingInfo(preset.wmdFormatting, preset.name).customMarker)
+    .sort((a, b) => String(b.wmdFormatting || "").length - String(a.wmdFormatting || "").length);
+}
+
+function applyCustomMarkerLine(line, presets) {
+  for (const preset of presets) {
+    const marker = normalizeWmdFormatting(preset.wmdFormatting);
+    if (!marker) continue;
+    const match = String(line).match(new RegExp(`^(\\s*)${escapeRegExp(marker)}(?:\\s+|$)([\\s\\S]*)$`));
+    if (!match) continue;
+    const info = wmdFormattingInfo(marker, preset.name);
+    const text = match[2] || preset.name || "Heading";
+    const markdown = info.block === "heading" ? `${match[1]}## ${text}` : `${match[1]}${text}`;
+    return { markdown, preset: preset.id };
+  }
+  return null;
+}
+
+function prepareStyleMarkers(markdown, stylePresets = {}) {
+  const lines = String(markdown || "").split(/\r?\n/);
+  const markers = new Map();
+  const customPresets = customMarkerPresets(stylePresets);
+  let currentStyle = "";
+
+  const prepared = lines.map((line, index) => {
+    const start = line.trim().match(/^@style\s+(.+?)\s*$/i);
+    if (start) {
+      currentStyle = normalizeStyleName(start[1]);
+      return "";
+    }
+
+    if (/^@end(?:style)?\s*$/i.test(line.trim())) {
+      currentStyle = "";
+      return "";
+    }
+
+    const custom = !currentStyle ? applyCustomMarkerLine(line, customPresets) : null;
+    if (custom) {
+      markers.set(index, custom.preset);
+      return custom.markdown;
+    }
+
+    if (line.trim() && currentStyle) markers.set(index, currentStyle);
+    return line;
+  });
+
+  return { markdown: prepared.join("\n"), markers };
+}
+
+function applyPresetMarkersToTokens(tokens, markers) {
+  for (const token of tokens) {
+    if (!["heading_open", "paragraph_open", "bullet_list_open", "ordered_list_open", "blockquote_open", "table_open", "wmd_callout_open"].includes(token.type)) continue;
+    const sourceLine = token.map && token.map[0];
+    const preset = markers.get(sourceLine);
+    if (!preset) continue;
+    token.attrJoin("class", `wmd-preset-${preset}`);
+    token.attrSet("data-wmd-preset", preset);
   }
 }
 
@@ -785,13 +996,16 @@ function makeMarkdownIt() {
   return md;
 }
 
-function renderTab(md, tab, env) {
-  const tokens = md.parse(tab.resolvedContent, env);
+function renderTab(md, tab, env, config) {
+  const prepared = prepareStyleMarkers(tab.resolvedContent, config.stylePresets);
+  const tokens = md.parse(prepared.markdown, env);
   applyHeadingIdsToTokens(tokens, tab.headings);
+  applyPresetMarkersToTokens(tokens, prepared.markers);
   return md.renderer.render(tokens, md.options, env);
 }
 
 function buildHtml(config, tabs, warnings) {
+  const presetCss = stylePresetCss(config.stylePresets);
   const allHeadings = tabs.flatMap((tab) => tab.headings);
   const visibleTabs = tabs.filter((tab) => !tab.hidden);
   const visibleHeadings = allHeadings.filter((heading) => !heading.hidden);
@@ -849,7 +1063,7 @@ function buildHtml(config, tabs, warnings) {
         currentTabName: tab.name,
         currentTabSlug: tab.refSlug,
         currentTabHeadings: tab.headings,
-      });
+      }, config);
 
       const titleHtml = tab.title
         ? `<h1 class="tab-title">${escapeHtml(tab.title)}</h1>`
@@ -908,6 +1122,8 @@ ${finalWarnings.map((warning) => `<p>${escapeHtml(warning)}</p>`).join("\n")}
     --content-width: ${config.contentWidth};
   }
 
+  ${presetCss}
+
   body.dark {
     --bg: #121212;
     --text: #eeeeee;
@@ -922,6 +1138,30 @@ ${finalWarnings.map((warning) => `<p>${escapeHtml(warning)}</p>`).join("\n")}
     --warning-border: #d79b00;
     --surface-soft: #1c1c1c;
     --surface-raised: #181818;
+  }
+
+  body.dark,
+  body.dark * {
+    scrollbar-color: var(--border) var(--bg);
+  }
+
+  body.dark ::-webkit-scrollbar {
+    width: 12px;
+    height: 12px;
+  }
+
+  body.dark ::-webkit-scrollbar-track {
+    background: var(--bg);
+  }
+
+  body.dark ::-webkit-scrollbar-thumb {
+    background: var(--border);
+    border: 3px solid var(--bg);
+    border-radius: 999px;
+  }
+
+  body.dark ::-webkit-scrollbar-thumb:hover {
+    background: var(--muted);
   }
 
   body {
@@ -1575,7 +1815,7 @@ function compile(source) {
   }
 
   for (const tab of tabs) {
-    tab.headings = collectHeadings(md, tab);
+    tab.headings = collectHeadings(md, tab, config);
   }
 
   return buildHtml(config, tabs, warnings);

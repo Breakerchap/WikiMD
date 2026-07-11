@@ -8,6 +8,32 @@
     <link rel="stylesheet" href="/app.css">
   </head>
   <body data-theme="light">
+    <section class="documents-page" id="documentsPage" hidden>
+      <div class="documents-card">
+        <header class="documents-header">
+          <div>
+            <span class="eyebrow">WMD Studio</span>
+            <h1>Your documents</h1>
+            <p>Create, open, or delete saved WMD documents from this workspace.</p>
+          </div>
+          <button class="quiet-button" id="backToEditorButton" type="button">Back to editor</button>
+        </header>
+
+        <form class="documents-create" id="documentsCreateForm">
+          <label>New document name
+            <input id="newDocumentName" maxlength="80" placeholder="e.g. Campaign rules">
+          </label>
+          <button class="primary-button" id="createDocumentButton" type="submit">Create document</button>
+        </form>
+
+        <div class="documents-list-header">
+          <strong>Saved documents</strong>
+          <button class="quiet-button" id="refreshDocumentsButton" type="button">Refresh</button>
+        </div>
+        <div class="documents-list-page" id="documentsListPage" aria-live="polite"></div>
+      </div>
+    </section>
+
     <main class="studio-shell">
       <header class="topbar">
         <div class="brand" aria-label="WMD Studio">
@@ -24,6 +50,7 @@
         </div>
         <div class="topbar-actions">
           <span class="connection-status" id="connectionStatus">Connecting</span>
+          <button class="quiet-button" id="documentsButton" type="button">Documents</button>
           <button class="quiet-button" id="uploadButton" type="button">Upload</button>
           <input id="importInput" type="file" accept=".md,.markdown,.wmd,.docx" hidden>
           <button class="quiet-button" id="renameButton" type="button">Rename</button>
@@ -37,12 +64,6 @@
       <section class="document-toolbar" aria-label="Document controls">
         <select id="blockStyleControl" aria-label="Paragraph style" title="Paragraph style">
           <option value="p">Normal text</option>
-          <option value="h1">Title</option>
-          <option value="h2">Heading 1</option>
-          <option value="h3">Heading 2</option>
-          <option value="h4">Heading 3</option>
-          <option value="h5">Heading 4</option>
-          <option value="h6">Heading 5</option>
         </select>
         <select id="fontControl" aria-label="Document font" title="Document font">
           <option value="Arial, sans-serif" style="font-family: Arial, sans-serif">Arial</option>
@@ -70,6 +91,7 @@
         <button class="underline-button" data-command="underline" type="button" title="Underline">U</button>
         <button class="strike-button" data-command="strikeThrough" type="button" title="Strikethrough">S</button>
         <button data-command="highlight" type="button" title="Highlight">Pen</button>
+        <button id="stylePresetButton" type="button" title="Create or edit the selected style">Style</button>
         <span class="toolbar-divider"></span>
         <button data-insert="link" type="button" title="Insert link (Ctrl+K)">Link</button>
         <button data-insert="image" type="button" title="Insert image">Image</button>
@@ -111,7 +133,7 @@
           <div class="editor-surface">
             <div class="raw-editor-shell" id="rawEditorShell" hidden>
               <pre class="wmd-highlight" id="wmdHighlight" aria-hidden="true"><code></code></pre>
-              <textarea id="editor" class="source-editor" wrap="off" spellcheck="true" autocapitalize="off" autocomplete="off" aria-label="WMD source editor" placeholder="Write WMD here..."></textarea>
+              <textarea id="editor" class="source-editor" wrap="soft" spellcheck="true" autocapitalize="off" autocomplete="off" aria-label="WMD source editor" placeholder="Write WMD here..."></textarea>
               <div class="editor-hint">Source mode has WMD highlighting, smart pairs, macros, and live compiler warnings.</div>
             </div>
           </div>
@@ -120,18 +142,6 @@
         <div class="pane-resizer" data-resize="split" role="separator" aria-label="Resize WMD source and document panels" tabindex="0"></div>
 
         <section class="preview-zone pane" id="previewZone">
-          <div class="preview-header">
-            <div>
-              <span class="eyebrow">Actual compiled document</span>
-              <h2>Document canvas</h2>
-            </div>
-            <div class="preview-actions">
-              <span class="preview-state" id="previewState">Ready</span>
-              <button class="mobile-edit-button" id="mobileEditButton" type="button">Edit</button>
-            </div>
-          </div>
-          <nav class="document-tabs" id="documentTabs" aria-label="Document tabs" hidden></nav>
-          <div class="warning-list" id="warningList" hidden></div>
           <iframe id="preview" title="Compiled WMD preview" sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox"></iframe>
         </section>
       </section>

@@ -18,17 +18,18 @@
       "font: ${1:Arial, sans-serif}",
       "monoFont: ${2:Consolas, monospace}",
       "baseSize: ${3:16px}",
-      "titleSize: ${4:3rem}",
-      "h1Size: ${5:2rem}",
-      "h2Size: ${6:1.5rem}",
-      "h3Size: ${7:1.25rem}",
-      "lineHeight: ${8:1.6}",
-      "contentWidth: ${9:900px}",
+      "lineHeight: ${4:1.6}",
+      "contentWidth: ${5:900px}",
+      "Title: {keybind: Ctrl+Shift+`; size: ${6:3rem}; font: ${7:Arial, sans-serif}; bold: true; heading: 1};",
+      "Heading 1: {keybind: Ctrl+Shift+1; size: ${8:2rem}; font: ${9:Arial, sans-serif}; bold: true; heading: 1};",
+      "Normal Text: {keybind: Ctrl+Shift+0; size: ${10:16px}; font: ${11:Arial, sans-serif}; paragraph: true};",
+      "Italic List: {keybind: Ctrl+Alt+L; italic: true; unordered-list: true};",
+      "Warning Box: {keybind: Ctrl+Alt+W; callout: warning; bold: true};",
       "@endconfig",
       "",
       "$0"
     ],
-    "description": "Insert a full WMD config block"
+    "description": "Insert a WMD config block with document settings and style presets"
   },
   "Title": {
     "prefix": "@title",
@@ -153,5 +154,14 @@
       "@endcollapse"
     ],
     "description": "Insert a collapsible section"
+  },
+  "Styled Block": {
+    "prefix": "@style",
+    "body": [
+      "@style ${1:Style Name}",
+      "${2:Styled content}",
+      "@end"
+    ],
+    "description": "Apply a configured style to a block"
   }
 }

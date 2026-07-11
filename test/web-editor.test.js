@@ -1,6 +1,6 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
-const { applyOperation, normalizeDocumentId, transformOperations } = require("../web/server");
+const { applyOperation, createStarterDocument, normalizeDocumentId, transformOperations } = require("../web/server");
 
 test("normalizes document names into shareable ids", () => {
   assert.equal(normalizeDocumentId("My Team Notes.docx"), "my-team-notes");
@@ -33,4 +33,14 @@ test("transforms a deletion against a simultaneous insertion", () => {
     applyOperation(applyOperation(original, insertion), deletionPrime),
     applyOperation(applyOperation(original, deletion), insertionPrime),
   );
+});
+
+
+test("new documents start with config-driven heading styles", () => {
+  const source = createStarterDocument("new-notes");
+  assert.ok(source.startsWith("@config\nNormal Text: {wmd-formatting: ; keybind: ctrl+shift+0; size: 16px; font: arial};\n"));
+  assert.ok(source.includes("Title: {wmd-formatting: @title; keybind: ctrl+shift+`; size: 45px; font: arial};"));
+  assert.ok(source.includes("Heading 1: {wmd-formatting: #; keybind: ctrl+shift+1; size: 38px; font: arial; bold: true};"));
+  assert.ok(source.includes("Heading 4: {wmd-formatting: ####; keybind: ctrl+shift+4; size: 18px; font: arial; bold: false; italic: true};"));
+  assert.match(source, /@tab Test\n@title Home\n\n# Home\n$/);
 });

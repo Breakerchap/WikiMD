@@ -39,7 +39,26 @@ node web/server.js
 
 Then open `http://127.0.0.1:4313`. It opens in an editable version of the actual compiled document, with a toggle to syntax-highlighted raw WMD. The Docs-style toolbar provides document style, font, size, zoom, formatting, links, images, headings, lists, callouts, tabs, and undo/redo. The workspace also has resizable/hideable panes, MD/WMD/DOCX import, and `.wmd` downloads.
 
-Settings are stored per browser and include your username, cursor color, global theme, main color palette, default editor mode, and text macros such as `--` becoming an en dash. Collaborators in the same mode see each other's named cursors as they type, and everyone sees live source and document changes. Use `++underlined text++` for persistent WMD underline.
+Settings are stored per browser and include your username, cursor color, global theme, main color palette, default editor mode, and text macros such as `--` becoming an en dash. Document styles now live in the WMD `@config` block, so collaborators get the same shortcuts and formatting. Select a Title, Heading, Normal Text, or custom-styled block to change its shared font, size, block type, callout type, checklist/list behaviour, highlight, and formatting from the toolbar; every block using that style updates together. The `Style` toolbar button creates or edits config-backed styles and can record a keybind by clicking **Record** and pressing the shortcut. Use `++underlined text++` for persistent WMD underline.
+
+Style presets use readable config lines:
+
+```wmd
+@config
+Title: {keybind: Ctrl+Shift+`; size: 3rem; font: Arial; bold: true; heading: 1};
+Heading 1: {keybind: Ctrl+Shift+1; size: 2rem; font: Arial; bold: true; heading: 1};
+Italic List: {keybind: Ctrl+Alt+L; italic: true; unordered-list: true};
+Warning Box: {keybind: Ctrl+Alt+W; callout: warning; bold: true};
+@endconfig
+```
+
+Custom style assignments are preserved with a start marker and the shorter `@end` marker:
+
+```wmd
+@style Warning Box
+Remember the dragon's reaction.
+@end
+```
 
 Saved browser documents live in `web/data/`, which is intentionally ignored by Git. The browser also keeps a local recovery copy for every document and sync server, so an edit made while offline is restored after a refresh or reconnect.
 

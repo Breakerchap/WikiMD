@@ -80,6 +80,26 @@ test("double plus markers compile to persistent underline", () => {
   assert.match(result.html, /<u>Important<\/u>/);
 });
 
+test("style markers decorate blocks without rendering the directive", () => {
+  const result = compile(`@config
+Project Heading: {bold: true; heading: 2};
+Tagline: {italic: true};
+@endconfig
+
+@tab Home
+@style Project Heading
+## Project plan
+@end
+
+@style Tagline
+A styled paragraph
+@end`);
+
+  assert.match(result.html, /<h2[^>]*class="wmd-preset-project-heading"[^>]*data-wmd-preset="project-heading"[^>]*>Project plan<\/h2>/);
+  assert.match(result.html, /<p[^>]*class="wmd-preset-tagline"[^>]*data-wmd-preset="tagline"[^>]*>A styled paragraph<\/p>/);
+  assert.doesNotMatch(result.html, />@style /);
+});
+
 test("callout types retain their compiled style classes", () => {
   const result = compile("@tab Home\n!warning Check this\nImportant detail\n!end");
 
@@ -121,4 +141,20 @@ test("web server options support LAN and a public editor URL", () => {
   assert.equal(options.host, "0.0.0.0");
   assert.equal(options.port, 4510);
   assert.equal(options.publicUrl, "https://docs.example.com");
+});
+
+test("config-defined custom heading markers compile and style headings", () => {
+  const result = compile(`@config
+Heading A: {wmd-formatting: $; keybind: ctrl+shift+a; size: 80px; font: arial; bold: true; italic: true};
+Heading B: {wmd-formatting: \\\\; keybind: ctrl+shift+b; size: 60px; font: garamond; bold: true};
+@endconfig
+
+@tab Test
+$ Alpha
+\\\\ Beta`);
+
+  assert.match(result.html, /<h2[^>]*id="test-alpha"[^>]*class="wmd-preset-heading-a"[^>]*data-wmd-preset="heading-a"[^>]*>Alpha<\/h2>/);
+  assert.match(result.html, /<h2[^>]*id="test-beta"[^>]*class="wmd-preset-heading-b"[^>]*data-wmd-preset="heading-b"[^>]*>Beta<\/h2>/);
+  assert.match(result.html, /\[data-wmd-preset="heading-a"\]\{[^}]*font-size:80px/);
+  assert.match(result.html, /\[data-wmd-preset="heading-b"\]\{[^}]*font-family:garamond/);
 });
