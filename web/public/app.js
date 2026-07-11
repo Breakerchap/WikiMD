@@ -81,13 +81,20 @@
     socket: null,
     socketGeneration: 0,
     reconnectTimer: null,
+    operationTimer: null,
     compileTimer: null,
     compileController: null,
     compileGeneration: 0,
     localSaveTimer: null,
     selectionTimer: null,
+    collaboratorSelectionTimer: null,
+    pendingCollaboratorSelection: null,
     canvasSelection: null,
     canvasText: null,
+    canvasSource: null,
+    canvasExternalOperations: [],
+    canvasRenderId: "",
+    canvasLastInputAt: 0,
     restoreCanvasSelection: false,
     previewScroll: { left: 0, top: 0 },
     previewFocus: null,
@@ -599,6 +606,22 @@
     return [{ ops: leftPrime }, { ops: rightPrime }];
   }
 
+  function trackCanvasExternalOperation(operation) {
+    if (!operation || state.mode !== "document" || typeof state.canvasSource !== "string") return;
+    state.canvasExternalOperations.push(operation);
+  }
+
+  function rebaseCanvasOperation(operation) {
+    let rebased = operation;
+    const externalOperations = [];
+    for (const external of state.canvasExternalOperations) {
+      const [localPrime, externalPrime] = transformOperations(rebased, external);
+      rebased = localPrime;
+      externalOperations.push(externalPrime);
+    }
+    return { operation: rebased, externalOperations };
+  }
+
   function resolvedTheme() {
     if (settings.theme !== "system") return settings.theme;
     return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
@@ -1107,20 +1130,113 @@
     return produced + Math.max(0, sourceOffset - consumed);
   }
 
+  function textOccurrences(source, value, limit = 120) {
+    if (!value) return [];
+    const positions = [];
+    let position = source.indexOf(value);
+    while (position !== -1 && positions.length < limit) {
+      positions.push(position);
+      position = source.indexOf(value, position + 1);
+    }
+    return positions;
+  }
+
+  function mapOffsetBetweenTexts(before, after, offset) {
+    const sourceOffset = clamp(Number(offset) || 0, 0, before.length);
+    if (before === after) return clamp(sourceOffset, 0, after.length);
+
+    let prefix = 0;
+    while (prefix < before.length && prefix < after.length && before[prefix] === after[prefix]) prefix += 1;
+    let suffix = 0;
+    while (suffix < before.length - prefix && suffix < after.length - prefix
+      && before[before.length - 1 - suffix] === after[after.length - 1 - suffix]) suffix += 1;
+    if (sourceOffset <= prefix) return sourceOffset;
+    if (sourceOffset >= before.length - suffix) return after.length - (before.length - sourceOffset);
+
+    const contextSize = 32;
+    const left = before.slice(Math.max(0, sourceOffset - contextSize), sourceOffset);
+    const right = before.slice(sourceOffset, Math.min(before.length, sourceOffset + contextSize));
+    const combined = left + right;
+    const combinedMatches = textOccurrences(after, combined);
+    if (combinedMatches.length === 1) return combinedMatches[0] + left.length;
+
+    const expected = clamp(sourceOffset + (after.length - before.length), 0, after.length);
+    const leftEnds = textOccurrences(after, left).map((position) => position + left.length);
+    const rightStarts = textOccurrences(after, right);
+    let best = null;
+    for (const leftEnd of leftEnds) {
+      for (const rightStart of rightStarts) {
+        if (leftEnd > rightStart) continue;
+        const score = (rightStart - leftEnd) * 4 + Math.abs(rightStart - expected);
+        if (!best || score < best.score) best = { offset: rightStart, score };
+      }
+    }
+    if (best) return best.offset;
+    if (rightStarts.length) return rightStarts.reduce((nearest, position) => Math.abs(position - expected) < Math.abs(nearest - expected) ? position : nearest);
+    if (leftEnds.length) return leftEnds.reduce((nearest, position) => Math.abs(position - expected) < Math.abs(nearest - expected) ? position : nearest);
+
+    return mapOffsetThroughOperation(sourceOffset, operationFromDiff(before, after));
+  }
+
+  function remapCanvasSelections(before, after) {
+    state.users = state.users.map((user) => {
+      if (!user.selection || user.selection.mode !== "canvas") return user;
+      return {
+        ...user,
+        selection: {
+          ...user.selection,
+          start: mapOffsetBetweenTexts(before, after, user.selection.start),
+          end: mapOffsetBetweenTexts(before, after, user.selection.end),
+        },
+      };
+    });
+  }
+
+  function transformCollaboratorSelections(operation, mode) {
+    if (!operation) return;
+    state.users = state.users.map((user) => {
+      if (!user.selection || user.selection.mode !== mode) return user;
+      return {
+        ...user,
+        selection: {
+          ...user.selection,
+          start: mapOffsetThroughOperation(user.selection.start, operation),
+          end: mapOffsetThroughOperation(user.selection.end, operation),
+        },
+      };
+    });
+  }
+
+  function refreshCollaborators() {
+    renderPresence();
+    sendCanvasCursors();
+    if (state.mode === "wmd") renderHighlight();
+  }
+
+  function updateCollaborator(user) {
+    if (!user || !user.id) return;
+    const index = state.users.findIndex((candidate) => candidate.id === user.id);
+    if (index === -1) state.users = [...state.users, user];
+    else state.users = state.users.map((candidate, candidateIndex) => candidateIndex === index ? { ...candidate, ...user } : candidate);
+    refreshCollaborators();
+  }
+
   function captureRawSelection() {
     if (state.mode !== "wmd" || document.activeElement !== editor) return null;
     return {
       start: editor.selectionStart,
       end: editor.selectionEnd,
+      source: state.source,
       scrollTop: editor.scrollTop,
       scrollLeft: editor.scrollLeft,
     };
   }
 
-  function restoreRawSelection(selection, operation) {
+  function restoreRawSelection(selection) {
     if (!selection) return;
-    const start = clamp(mapOffsetThroughOperation(selection.start, operation), 0, state.source.length);
-    const end = clamp(mapOffsetThroughOperation(selection.end, operation), 0, state.source.length);
+    const previousSource = typeof selection.source === "string" ? selection.source : state.source;
+    const start = clamp(mapOffsetBetweenTexts(previousSource, state.source, selection.start), 0, state.source.length);
+    const end = clamp(mapOffsetBetweenTexts(previousSource, state.source, selection.end), 0, state.source.length);
     editor.setSelectionRange(start, end);
     editor.scrollTop = selection.scrollTop;
     editor.scrollLeft = selection.scrollLeft;
@@ -1133,6 +1249,20 @@
 
   function send(message) {
     if (state.socket && state.socket.readyState === WebSocket.OPEN) state.socket.send(JSON.stringify(message));
+  }
+
+  function clearOperationTimeout() {
+    clearTimeout(state.operationTimer);
+    state.operationTimer = null;
+  }
+
+  function watchInFlightOperation(entry) {
+    clearOperationTimeout();
+    state.operationTimer = setTimeout(() => {
+      if (!state.inFlight || state.inFlight.id !== entry.id) return;
+      setConnectionState("problem", "Sync delayed - retrying");
+      requestRefresh();
+    }, 10_000);
   }
 
   function connect() {
@@ -1164,6 +1294,7 @@
     });
     socket.addEventListener("close", () => {
       if (generation !== state.socketGeneration || state.shuttingDown) return;
+      clearOperationTimeout();
       setConnectionState("problem", "Reconnecting - local copy safe");
       scheduleReconnect(generation);
     });
@@ -1193,9 +1324,11 @@
     }
     if (message.type === "presence") {
       state.users = message.users || [];
-      renderPresence();
-      sendCanvasCursors();
-      if (state.mode === "wmd") renderHighlight();
+      refreshCollaborators();
+      return;
+    }
+    if (message.type === "selection") {
+      updateCollaborator(message.user);
       return;
     }
     if (message.type === "resync") {
@@ -1204,7 +1337,10 @@
       requestRefresh();
       return;
     }
-    if (message.type === "error") toastMessage(message.message || "The server rejected an edit.");
+    if (message.type === "error") {
+      toastMessage(message.message || "The server rejected an edit.");
+      requestRefresh();
+    }
   }
 
   function receiveDocument(document) {
@@ -1216,6 +1352,10 @@
     state.revision = document.revision;
     state.pending = [];
     state.inFlight = null;
+    clearOperationTimeout();
+    state.canvasRenderId = "";
+    state.canvasSource = null;
+    state.canvasExternalOperations = [];
     state.ready = true;
     state.importedSource = null;
     resetHistory();
@@ -1238,11 +1378,13 @@
   }
 
   function receiveOperation(message) {
+    transformCollaboratorSelections(message.operation, "wmd");
     state.serverSource = applyOperation(state.serverSource, message.operation);
     state.revision = message.revision;
 
     if (message.clientId === state.clientId && state.inFlight && message.clientOperationId === state.inFlight.id) {
       state.inFlight = null;
+      clearOperationTimeout();
       state.dirty = Boolean(state.pending.length);
       saveStatus.textContent = state.dirty ? "Saving changes..." : "All changes saved";
       persistDraft();
@@ -1259,14 +1401,16 @@
         incoming = remoteOperation;
         return { ...entry, operation: localOperation };
       });
+      trackCanvasExternalOperation(incoming);
       state.source = applyOperation(state.source, incoming);
       resetHistory();
       if (state.canvasSelection && state.mode === "document") state.restoreCanvasSelection = true;
       state.dirty = Boolean(state.pending.length || state.inFlight);
       renderSource();
-      restoreRawSelection(rawSelection, incoming);
+      restoreRawSelection(rawSelection);
       persistDraft();
-      scheduleCompile(140);
+      if (state.mode === "document") scheduleDocumentCanvasRefresh();
+      else scheduleCompile(140);
       saveStatus.textContent = "Updated by a collaborator";
     } catch (_) {
       requestRefresh();
@@ -1277,6 +1421,7 @@
     if (nextSource === state.source) return;
     const previousSource = state.source;
     const operation = operationFromDiff(previousSource, nextSource);
+    if (options.canvas !== true) trackCanvasExternalOperation(operation);
     if (options.history !== false) recordHistory(previousSource, options);
     state.source = nextSource;
     state.dirty = true;
@@ -1327,6 +1472,7 @@
       clientOperationId: state.inFlight.id,
       operation: state.inFlight.operation,
     });
+    watchInFlightOperation(state.inFlight);
   }
 
   function scheduleCompile(delay = 260) {
@@ -1338,6 +1484,9 @@
 
   async function compilePreview(generation) {
     if (!state.source) {
+      state.canvasRenderId = "";
+      state.canvasSource = null;
+      state.canvasExternalOperations = [];
       preview.srcdoc = "<!doctype html><body></body>";
       return;
     }
@@ -1354,7 +1503,19 @@
       const result = await response.json();
       if (!response.ok) throw new Error(result.error || "Compilation failed.");
       if (generation !== state.compileGeneration) return;
-      preview.srcdoc = state.mode === "document" ? editableCanvasHtml(themedHtml(result.html)) : themedHtml(result.html);
+      if (state.mode === "document" && source !== state.source) {
+        scheduleCompile(0);
+        return;
+      }
+      if (state.mode === "document") {
+        const canvasRenderId = createId();
+        state.canvasRenderId = canvasRenderId;
+        state.canvasSource = source;
+        state.canvasExternalOperations = [];
+        preview.srcdoc = editableCanvasHtml(themedHtml(result.html), canvasRenderId);
+      } else {
+        preview.srcdoc = themedHtml(result.html);
+      }
       renderWarnings(result.warnings || []);
     } catch (error) {
       if (error.name === "AbortError" || generation !== state.compileGeneration) return;
@@ -1501,7 +1662,7 @@
 </script>`;
   }
 
-  function editableCanvasHtml(html) {
+  function editableCanvasHtml(html, canvasRenderId) {
     const bridge = `
 <style>
   .layout { min-height: 100vh; }
@@ -1662,21 +1823,49 @@
   function post(type, payload) {
     var message = payload || {};
     message.channel = 'wmd-studio-canvas';
+    message.canvasRenderId = '${canvasRenderId}';
     message.type = type;
     parent.postMessage(message, '*');
+  }
+
+  var CANVAS_IGNORED_SELECTOR = '.wmd-studio-cursor, .heading-collapse-marker, .wmd-studio-duplicate-title, .warning-panel';
+
+  function canvasTextNodes(root) {
+    var walker = document.createTreeWalker(root || main, NodeFilter.SHOW_TEXT, { acceptNode: function(node) {
+      return node.parentElement && node.parentElement.closest(CANVAS_IGNORED_SELECTOR)
+        ? NodeFilter.FILTER_REJECT
+        : NodeFilter.FILTER_ACCEPT;
+    }});
+    var nodes = [];
+    var node = walker.nextNode();
+    while (node) {
+      nodes.push(node);
+      node = walker.nextNode();
+    }
+    return nodes;
+  }
+
+  function canonicalCanvasText() {
+    return canvasTextNodes(main).map(function(node) { return node.data; }).join('');
   }
 
   function offsetFor(node, offset) {
     var range = document.createRange();
     range.selectNodeContents(main);
-    try { range.setEnd(node, offset); } catch (_) { return 0; }
-    return range.toString().length;
+    try {
+      range.setEnd(node, offset);
+      var fragment = range.cloneContents();
+      fragment.querySelectorAll(CANVAS_IGNORED_SELECTOR).forEach(function(element) { element.remove(); });
+      return fragment.textContent.length;
+    } catch (_) { return 0; }
   }
 
   function selectionInfo() {
     var selection = window.getSelection();
     if (!selection || !main.contains(selection.anchorNode)) return { start: 0, end: 0, preset: '' };
-    return { start: offsetFor(selection.anchorNode, selection.anchorOffset), end: offsetFor(selection.focusNode, selection.focusOffset), preset: selectedPresetId() };
+    var anchor = offsetFor(selection.anchorNode, selection.anchorOffset);
+    var focus = offsetFor(selection.focusNode, selection.focusOffset);
+    return { start: Math.min(anchor, focus), end: Math.max(anchor, focus), preset: selectedPresetId() };
   }
 
   function findMacro(before) {
@@ -1701,19 +1890,18 @@
 
   function notifyInput() {
     refreshSidebarNavigation();
-    post('input', { html: main.innerHTML, selection: selectionInfo(), text: main.textContent });
+    post('input', { html: main.innerHTML, selection: selectionInfo(), text: canonicalCanvasText() });
   }
 
   function clearCursors() { document.querySelectorAll('.wmd-studio-cursor').forEach(function(cursor) { cursor.remove(); }); }
 
   function addCursor(user) {
-    var target = Math.max(0, Math.min(Number(user.selection.end) || 0, main.textContent.length));
-    var walker = document.createTreeWalker(main, NodeFilter.SHOW_TEXT, { acceptNode: function(node) {
-      return node.parentElement && node.parentElement.closest('.wmd-studio-cursor') ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT;
-    }});
+    var nodes = canvasTextNodes(main);
+    var textLength = nodes.reduce(function(total, node) { return total + node.data.length; }, 0);
+    var target = Math.max(0, Math.min(Number(user.selection.end) || 0, textLength));
     var count = 0;
-    var node = walker.nextNode();
-    while (node) {
+    for (var index = 0; index < nodes.length; index += 1) {
+      var node = nodes[index];
       if (target <= count + node.data.length) {
         var range = document.createRange();
         range.setStart(node, target - count);
@@ -1727,21 +1915,18 @@
         return;
       }
       count += node.data.length;
-      node = walker.nextNode();
     }
   }
 
   function textPosition(target) {
-    var offset = Math.max(0, Math.min(Number(target) || 0, main.textContent.length));
-    var walker = document.createTreeWalker(main, NodeFilter.SHOW_TEXT, { acceptNode: function(node) {
-      return node.parentElement && node.parentElement.closest('.wmd-studio-cursor') ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT;
-    }});
+    var nodes = canvasTextNodes(main);
+    var textLength = nodes.reduce(function(total, node) { return total + node.data.length; }, 0);
+    var offset = Math.max(0, Math.min(Number(target) || 0, textLength));
     var count = 0;
-    var node = walker.nextNode();
-    while (node) {
+    for (var index = 0; index < nodes.length; index += 1) {
+      var node = nodes[index];
       if (offset <= count + node.data.length) return { node: node, offset: offset - count };
       count += node.data.length;
-      node = walker.nextNode();
     }
     return { node: main, offset: main.childNodes.length };
   }
@@ -2284,23 +2469,20 @@
       return;
     }
     if (data.type === 'command') command(data);
-    if (data.type === 'cursors') {
-      clearCursors();
-      (data.users || []).slice().sort(function(a, b) { return (b.selection.end || 0) - (a.selection.end || 0); }).forEach(addCursor);
-    }
+    if (data.type === 'cursors') clearCursors();
   });
-  post('ready', { text: main.textContent });
+  post('ready', { html: main.innerHTML, text: canonicalCanvasText() });
 })();
 </script>`;
     return html.replace("</body>", `${bridge}</body>`);
   }
 
-  function canvasHtmlToWmd(html) {
+  function canvasHtmlToWmd(html, baseSource = state.source) {
     const documentFragment = new DOMParser().parseFromString(`<main>${html}</main>`, "text/html");
     const root = documentFragment.querySelector("main");
     const sections = [...root.children].filter((child) => child.matches && child.matches("section.tab-section"));
-    if (!sections.length) return state.source;
-    const preambleMatch = state.source.match(/^[\s\S]*?(?=^@tab\b)/m);
+    if (!sections.length) return baseSource;
+    const preambleMatch = baseSource.match(/^[\s\S]*?(?=^@tab\b)/m);
     const preamble = preambleMatch ? preambleMatch[0].trim() : "";
     const tabs = sections.map((section) => {
       const name = section.dataset.tabName || "Home";
@@ -2412,6 +2594,10 @@
     applyPaneLayout();
     if (documentMode) scheduleCompile(0);
     else {
+      state.canvasRenderId = "";
+      state.canvasSource = null;
+      state.canvasExternalOperations = [];
+      state.canvasText = null;
       renderSource();
       // Canvas edits intentionally avoid an iframe refresh while typing. Recompile when leaving it.
       scheduleCompile(0);
@@ -3108,6 +3294,20 @@
     }, 90);
   }
 
+  function scheduleCanvasSelection(start, end) {
+    state.pendingCollaboratorSelection = {
+      mode: "canvas",
+      start: Math.max(0, Number(start) || 0),
+      end: Math.max(0, Number(end) || 0),
+    };
+    clearTimeout(state.collaboratorSelectionTimer);
+    state.collaboratorSelectionTimer = setTimeout(() => {
+      const selection = state.pendingCollaboratorSelection;
+      state.pendingCollaboratorSelection = null;
+      if (selection && state.ready && state.mode === "document") send({ type: "selection", ...selection });
+    }, 75);
+  }
+
   function postCanvas(message) {
     if (preview.contentWindow) preview.contentWindow.postMessage({ channel: "wmd-studio-canvas", ...message }, "*");
   }
@@ -3160,8 +3360,14 @@
   }
 
   function sendCanvasCursors() {
+    // Remote cursors must not be inserted into a live contenteditable document. Inserting
+    // marker spans splits text nodes and causes the browser to move the local selection.
+  }
+
+  function scheduleDocumentCanvasRefresh() {
     if (state.mode !== "document") return;
-    postCanvas({ type: "cursors", users: state.users.filter((user) => user.id !== state.clientId && user.selection && user.selection.mode === "canvas") });
+    const idleFor = Date.now() - state.canvasLastInputAt;
+    scheduleCompile(Math.max(80, 650 - idleFor));
   }
 
   function sendCanvasCommand(command, value = "") {
@@ -3186,13 +3392,22 @@
     if (event.source !== preview.contentWindow) return;
     const message = event.data || {};
     if (message.channel !== "wmd-studio-canvas") return;
+    if (!message.canvasRenderId || message.canvasRenderId !== state.canvasRenderId) return;
     if (message.type === "ready") {
       const nextText = String(message.text || "");
-      if (state.restoreCanvasSelection && state.canvasSelection && typeof state.canvasText === "string") {
-        const textOperation = operationFromDiff(state.canvasText, nextText);
+      const compiledCanvasSource = typeof state.canvasSource === "string" ? state.canvasSource : state.source;
+      const serializedCanvasSource = message.html ? canvasHtmlToWmd(String(message.html), compiledCanvasSource) : compiledCanvasSource;
+      const canvasBridge = operationFromDiff(serializedCanvasSource, compiledCanvasSource);
+      if (canvasBridge) {
+        state.canvasSource = serializedCanvasSource;
+        state.canvasExternalOperations = [canvasBridge, ...state.canvasExternalOperations];
+      }
+      const previousText = typeof state.canvasText === "string" ? state.canvasText : null;
+      if (previousText !== null && previousText !== nextText) remapCanvasSelections(previousText, nextText);
+      if (state.restoreCanvasSelection && state.canvasSelection && previousText !== null) {
         state.canvasSelection = {
-          start: mapOffsetThroughOperation(state.canvasSelection.start, textOperation),
-          end: mapOffsetThroughOperation(state.canvasSelection.end, textOperation),
+          start: mapOffsetBetweenTexts(previousText, nextText, state.canvasSelection.start),
+          end: mapOffsetBetweenTexts(previousText, nextText, state.canvasSelection.end),
         };
       }
       state.canvasText = nextText;
@@ -3200,6 +3415,7 @@
       return;
     }
     if (message.type === "input") {
+      state.canvasLastInputAt = Date.now();
       state.canvasText = String(message.text || "");
       if (message.selection) {
         state.canvasSelection = {
@@ -3208,7 +3424,23 @@
         };
         setActivePreset(message.selection.preset);
       }
-      changeSource(canvasHtmlToWmd(String(message.html || "")), { compile: false });
+      const canvasBase = typeof state.canvasSource === "string" ? state.canvasSource : state.source;
+      const nextCanvasSource = canvasHtmlToWmd(String(message.html || ""), canvasBase);
+      const canvasOperation = operationFromDiff(canvasBase, nextCanvasSource);
+      if (canvasOperation) {
+        try {
+          const rebased = rebaseCanvasOperation(canvasOperation);
+          const nextSource = applyOperation(state.source, rebased.operation);
+          state.canvasSource = nextCanvasSource;
+          state.canvasExternalOperations = rebased.externalOperations;
+          changeSource(nextSource, { compile: false, canvas: true });
+          if (state.canvasExternalOperations.length) scheduleDocumentCanvasRefresh();
+        } catch (_) {
+          state.restoreCanvasSelection = true;
+          scheduleCompile(0);
+          toastMessage("Refreshing the document to keep simultaneous edits aligned.");
+        }
+      }
       return;
     }
     if (message.type === "selection") {
@@ -3217,7 +3449,7 @@
         end: Number(message.end) || 0,
       };
       setActivePreset(message.preset);
-      send({ type: "selection", mode: "canvas", start: state.canvasSelection.start, end: state.canvasSelection.end });
+      scheduleCanvasSelection(state.canvasSelection.start, state.canvasSelection.end);
       return;
     }
     if (message.type === "scroll") {
@@ -3459,9 +3691,14 @@
     state.serverSource = "";
     state.pending = [];
     state.inFlight = null;
+    clearOperationTimeout();
     state.dirty = false;
     state.canvasSelection = null;
     state.canvasText = null;
+    state.canvasSource = null;
+    state.canvasExternalOperations = [];
+    state.canvasRenderId = "";
+    state.canvasLastInputAt = 0;
     state.restoreCanvasSelection = false;
     state.previewScroll = { left: 0, top: 0 };
     state.previewFocus = null;
@@ -3569,6 +3806,7 @@
       state.ready = false;
       state.pending = [];
       state.inFlight = null;
+      clearOperationTimeout();
       connect();
       toastMessage("Switching to the selected sync server. Your local draft is safe.");
     } else {
@@ -3800,8 +4038,10 @@
     persistDraft();
     cancelAnimationFrame(state.rawScrollFrame);
     clearTimeout(state.reconnectTimer);
+    clearOperationTimeout();
     clearTimeout(state.compileTimer);
     clearTimeout(state.selectionTimer);
+    clearTimeout(state.collaboratorSelectionTimer);
     state.compileController?.abort();
     if (state.socket && state.socket.readyState < WebSocket.CLOSING) state.socket.close();
   }
