@@ -202,28 +202,49 @@ function applyOperation(source, operation) {
   return output;
 }
 
-function mapOffsetThroughOperation(offset, operation) {
+function mapOffsetThroughOperation(offset, operation, affinity = "before") {
   const sourceOffset = Math.max(0, Number(offset) || 0);
   let consumed = 0;
   let produced = 0;
 
   for (const part of normalizeOperations(operation && operation.ops)) {
     if (typeof part === "string") {
+      if (sourceOffset === consumed && affinity !== "after") return produced;
       produced += part.length;
       continue;
     }
     if (part > 0) {
-      if (sourceOffset <= consumed + part) return produced + Math.max(0, sourceOffset - consumed);
+      if (sourceOffset < consumed + part) return produced + Math.max(0, sourceOffset - consumed);
       consumed += part;
       produced += part;
+      if (sourceOffset === consumed && affinity !== "after") return produced;
       continue;
     }
     const removed = -part;
-    if (sourceOffset <= consumed + removed) return produced;
+    if (sourceOffset < consumed + removed) return produced;
     consumed += removed;
+    if (sourceOffset === consumed && affinity !== "after") return produced;
   }
 
   return produced + Math.max(0, sourceOffset - consumed);
+}
+
+function mapSelectionThroughOperation(selection, operation, affinity = "before") {
+  const start = Math.max(0, Number(selection && selection.start) || 0);
+  const end = Math.max(0, Number(selection && selection.end) || 0);
+  const collapsed = start === end;
+  return {
+    start: mapOffsetThroughOperation(start, operation, collapsed ? affinity : "before"),
+    end: mapOffsetThroughOperation(end, operation, collapsed ? affinity : "after"),
+  };
+}
+
+function mapSelectionThroughHistory(selection, baseRevision, history) {
+  let mapped = { ...selection };
+  for (const entry of history || []) {
+    if (entry.revision > baseRevision) mapped = mapSelectionThroughOperation(mapped, entry.operation);
+  }
+  return mapped;
 }
 
 function appendOperation(target, part) {
@@ -409,6 +430,7 @@ function handleClientMessage(client, message) {
 
     try {
       const operation = transformAgainstHistory(message.operation, baseRevision, document.history);
+      const origin = ["wmd", "document", "history"].includes(message.origin) ? message.origin : "remote";
       const nextSource = applyOperation(document.source, operation);
       if (Buffer.byteLength(nextSource, "utf8") > MAX_BODY_BYTES) {
         throw new Error("Documents cannot exceed 12 MB.");
@@ -421,11 +443,10 @@ function handleClientMessage(client, message) {
         if (!collaborator.selection || collaborator.selection.mode !== "wmd") continue;
         collaborator.selection = {
           ...collaborator.selection,
-          start: mapOffsetThroughOperation(collaborator.selection.start, operation),
-          end: mapOffsetThroughOperation(collaborator.selection.end, operation),
+          ...mapSelectionThroughOperation(collaborator.selection, operation, collaborator === client ? "after" : "before"),
         };
       }
-      const historyEntry = { revision: document.revision, operation, bytes: operationByteLength(operation) };
+      const historyEntry = { revision: document.revision, operation, origin, bytes: operationByteLength(operation) };
       document.history.push(historyEntry);
       document.historyBytes += historyEntry.bytes;
       while (document.history.length > HISTORY_LIMIT || document.historyBytes > MAX_HISTORY_BYTES) {
@@ -438,6 +459,7 @@ function handleClientMessage(client, message) {
         clientId: client.clientId || client.id,
         clientOperationId: String(message.clientOperationId || ""),
         operation,
+        origin,
         revision: document.revision,
       });
     } catch (error) {
@@ -452,9 +474,16 @@ function handleClientMessage(client, message) {
     if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end < 0) return;
     const mode = message.mode === "canvas" ? "canvas" : "wmd";
     const document = mode === "wmd" ? readDocument(client.documentId) : null;
+    let selection = { start, end };
+    if (document && Number.isInteger(Number(message.baseRevision))) {
+      const baseRevision = Number(message.baseRevision);
+      const earliestRevision = document.history[0] ? document.history[0].revision - 1 : document.revision;
+      if (baseRevision < earliestRevision || baseRevision > document.revision) return;
+      selection = mapSelectionThroughHistory(selection, baseRevision, document.history);
+    }
     client.selection = {
-      start: document ? Math.min(start, document.source.length) : start,
-      end: document ? Math.min(end, document.source.length) : end,
+      start: document ? Math.min(selection.start, document.source.length) : start,
+      end: document ? Math.min(selection.end, document.source.length) : end,
       mode,
     };
     broadcastSelection(client);
@@ -933,5 +962,7 @@ module.exports = {
   normalizeDocumentId,
   parseOptions,
   mapOffsetThroughOperation,
+  mapSelectionThroughOperation,
+  mapSelectionThroughHistory,
   transformOperations,
 };

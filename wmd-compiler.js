@@ -47,6 +47,27 @@ function stripBom(text) {
   return String(text || "").replace(/^\uFEFF/, "");
 }
 
+function sourceLineRecords(source) {
+  const original = String(source || "");
+  const bomLength = original.startsWith("\uFEFF") ? 1 : 0;
+  const text = original.slice(bomLength);
+  const records = [];
+  let start = bomLength;
+  for (const match of text.matchAll(/([^\r\n]*)(\r\n|\n|\r|$)/g)) {
+    if (!match[0] && match.index === text.length) break;
+    records.push({
+      text: match[1],
+      start,
+      contentEnd: start + match[1].length,
+      end: start + match[0].length,
+    });
+    start += match[0].length;
+    if (!match[2]) break;
+  }
+  if (!records.length) records.push({ text: "", start: bomLength, contentEnd: bomLength, end: bomLength });
+  return records;
+}
+
 function parseTarget(target) {
   const raw = String(target || "").trim();
   const hashIndex = raw.indexOf("#");
@@ -649,7 +670,7 @@ function parseTabLine(line) {
   return { name, hidden };
 }
 
-function createTab(name, hidden) {
+function createTab(name, hidden, sourceStart = 0, headerRange = null) {
   return {
     name,
     title: null,
@@ -659,11 +680,18 @@ function createTab(name, hidden) {
     headings: [],
     refSlug: "",
     domId: "",
+    sourceStart,
+    sourceEnd: sourceStart,
+    headerRange,
+    titleRange: null,
+    contentRanges: [],
   };
 }
 
 function parseWmd(source) {
-  const lines = stripBom(source).split(/\r?\n/);
+  const sourceText = String(source || "");
+  const records = sourceLineRecords(sourceText);
+  const lines = records.map((record) => record.text);
 
   const config = {
     font: "Arial, sans-serif",
@@ -686,7 +714,9 @@ function parseWmd(source) {
   let currentTab = null;
   let inConfig = false;
 
-  for (const line of lines) {
+  for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
+    const line = lines[lineIndex];
+    const range = records[lineIndex];
     if (line.trim() === "@config") {
       inConfig = true;
       continue;
@@ -708,7 +738,8 @@ function parseWmd(source) {
 
     if (line.startsWith("@tab ")) {
       const tabInfo = parseTabLine(line);
-      currentTab = createTab(tabInfo.name, tabInfo.hidden);
+      if (currentTab) currentTab.sourceEnd = range.start;
+      currentTab = createTab(tabInfo.name, tabInfo.hidden, range.start, range);
       tabs.push(currentTab);
       continue;
     }
@@ -716,12 +747,13 @@ function parseWmd(source) {
     if (!currentTab) {
       if (line.trim() === "") continue;
 
-      currentTab = createTab("Main", false);
+      currentTab = createTab("Main", false, range.start, null);
       tabs.push(currentTab);
     }
 
     if (line.startsWith("@title ")) {
       currentTab.title = line.slice("@title ".length).trim();
+      currentTab.titleRange = range;
       continue;
     }
 
@@ -731,7 +763,10 @@ function parseWmd(source) {
     }
 
     currentTab.content.push(line);
+    currentTab.contentRanges.push(range);
   }
+
+  if (currentTab) currentTab.sourceEnd = sourceText.length;
 
   return { config, vars, tabs };
 }
@@ -902,6 +937,32 @@ function applyPresetMarkersToTokens(tokens, markers) {
   }
 }
 
+function applySourceRangesToTokens(tokens, tab) {
+  const lines = tab.content;
+  const ranges = tab.contentRanges;
+  for (const token of tokens) {
+    if (!token.block || !token.tag || !token.map || token.nesting < 0) continue;
+    let startLine = token.map[0];
+    let endLine = token.map[1];
+    if (!ranges[startLine] || !ranges[Math.max(startLine, endLine - 1)]) continue;
+
+    // A rendered block owns its explicit style wrapper as well as its Markdown
+    // lines, so a canvas edit cannot leave an orphaned @style/@end pair behind.
+    let wrapperStart = startLine - 1;
+    while (wrapperStart >= 0 && !String(lines[wrapperStart] || "").trim()) wrapperStart -= 1;
+    if (wrapperStart >= 0 && /^@style\s+/i.test(String(lines[wrapperStart] || "").trim())) startLine = wrapperStart;
+    let wrapperEnd = endLine;
+    while (wrapperEnd < lines.length && !String(lines[wrapperEnd] || "").trim()) wrapperEnd += 1;
+    if (startLine !== token.map[0] && wrapperEnd < lines.length && /^@end(?:style)?\s*$/i.test(String(lines[wrapperEnd] || "").trim())) endLine = wrapperEnd + 1;
+
+    const start = ranges[startLine].start;
+    const end = ranges[endLine - 1].contentEnd;
+    token.attrSet("data-wmd-source-start", String(start));
+    token.attrSet("data-wmd-source-end", String(end));
+    token.attrSet("data-wmd-source-key", `${start}:${end}`);
+  }
+}
+
 function extractHeadingSection(markdown, headingName) {
   const lines = markdown.split(/\r?\n/);
   const md = makeMarkdownIt();
@@ -1039,10 +1100,14 @@ function renderTab(md, tab, env, config) {
   const tokens = md.parse(prepared.markdown, env);
   applyHeadingIdsToTokens(tokens, tab.headings);
   applyPresetMarkersToTokens(tokens, prepared.markers);
-  return md.renderer.render(tokens, md.options, env);
+  applySourceRangesToTokens(tokens, tab);
+  return md.renderer.render(tokens, md.options, env).replace(
+    /<([^>]+?)\sdata-wmd-source-start="(\d+)"\sdata-wmd-source-end="(\d+)"\sdata-wmd-source-key="([^"]+)">/g,
+    (_match, tag, start, end, key) => `<!--wmd-source:${start}:${end}:${key}--><${tag}>`,
+  );
 }
 
-function buildHtml(config, tabs, warnings) {
+function buildHtml(config, tabs, warnings, sourceLength = 0) {
   const presetCss = stylePresetCss(config.stylePresets);
   const allHeadings = tabs.flatMap((tab) => tab.headings);
   const visibleTabs = tabs.filter((tab) => !tab.hidden);
@@ -1105,11 +1170,11 @@ function buildHtml(config, tabs, warnings) {
       }, config);
 
       const titleHtml = tab.title
-        ? `<h1 class="tab-title">${escapeHtml(tab.title)}</h1>`
+        ? `<h1 class="tab-title"${tab.titleRange ? ` data-wmd-source-start="${tab.titleRange.start}" data-wmd-source-end="${tab.titleRange.contentEnd}" data-wmd-source-key="${tab.titleRange.start}:${tab.titleRange.contentEnd}"` : ""}>${escapeHtml(tab.title)}</h1>`
         : "";
 
       return `
-<section id="${escapeHtml(tab.domId)}" class="tab-section ${active}" data-hidden="${tab.hidden ? "true" : "false"}" data-tab-name="${escapeHtml(tab.name)}" data-tab-hidden="${tab.hidden ? "true" : "false"}">
+<section id="${escapeHtml(tab.domId)}" class="tab-section ${active}" data-hidden="${tab.hidden ? "true" : "false"}" data-tab-name="${escapeHtml(tab.name)}" data-tab-hidden="${tab.hidden ? "true" : "false"}" data-wmd-source-start="${tab.sourceStart}" data-wmd-source-end="${tab.sourceEnd}" data-wmd-source-key="tab:${tab.sourceStart}">
 ${titleHtml}
 ${rendered}
 </section>`;
@@ -1610,7 +1675,7 @@ ${finalWarnings.map((warning) => `<p>${escapeHtml(warning)}</p>`).join("\n")}
     ${warningHtml}
   </aside>
 
-  <main>
+  <main data-wmd-source-start="0" data-wmd-source-end="${sourceLength}">
     ${tabSections}
   </main>
 </div>
@@ -1857,7 +1922,7 @@ function compile(source) {
     tab.headings = collectHeadings(md, tab, config);
   }
 
-  return buildHtml(config, tabs, warnings);
+  return buildHtml(config, tabs, warnings, String(source || "").length);
 }
 
 function ensureParentDirectory(filePath) {

@@ -15,6 +15,14 @@
     "Heading 4: {wmd-formatting: ####; keybind: ctrl+shift+4; size: 18px; font: arial; bold: false; italic: true};",
     "@endconfig",
   ].join("\n");
+  const UPDATE_ORIGIN = Object.freeze({
+    WMD: "wmd",
+    DOCUMENT: "document",
+    PARSER: "parser",
+    REMOTE: "remote",
+    HISTORY: "history",
+  });
+  const editorSync = globalThis.WmdEditorSync;
 
   const editor = document.querySelector("#editor");
   const highlightLayer = document.querySelector("#wmdHighlight");
@@ -112,6 +120,7 @@
     documentsLoading: false,
     libraryOpen: false,
     history: { undo: [], redo: [], lastAt: 0 },
+    updateOrigin: null,
   };
 
   function createId() {
@@ -612,14 +621,7 @@
   }
 
   function rebaseCanvasOperation(operation) {
-    let rebased = operation;
-    const externalOperations = [];
-    for (const external of state.canvasExternalOperations) {
-      const [localPrime, externalPrime] = transformOperations(rebased, external);
-      rebased = localPrime;
-      externalOperations.push(externalPrime);
-    }
-    return { operation: rebased, externalOperations };
+    return editorSync.rebaseOperationThroughExternal(operation, state.canvasExternalOperations);
   }
 
   function resolvedTheme() {
@@ -1106,28 +1108,8 @@
     updateToolbarValues();
   }
 
-  function mapOffsetThroughOperation(offset, operation) {
-    const sourceOffset = Math.max(0, Number(offset) || 0);
-    let consumed = 0;
-    let produced = 0;
-
-    for (const part of operation && operation.ops || []) {
-      if (typeof part === "string") {
-        produced += part.length;
-        continue;
-      }
-      if (part > 0) {
-        if (sourceOffset <= consumed + part) return produced + Math.max(0, sourceOffset - consumed);
-        consumed += part;
-        produced += part;
-      } else if (part < 0) {
-        const removed = -part;
-        if (sourceOffset <= consumed + removed) return produced;
-        consumed += removed;
-      }
-    }
-
-    return produced + Math.max(0, sourceOffset - consumed);
+  function mapOffsetThroughOperation(offset, operation, affinity = "before") {
+    return editorSync.mapOffsetThroughOperation(offset, operation, affinity);
   }
 
   function textOccurrences(source, value, limit = 120) {
@@ -1192,19 +1174,33 @@
     });
   }
 
-  function transformCollaboratorSelections(operation, mode) {
+  function transformCollaboratorSelections(operation, mode, authorId = "") {
     if (!operation) return;
     state.users = state.users.map((user) => {
       if (!user.selection || user.selection.mode !== mode) return user;
+      const collapsed = user.selection.start === user.selection.end;
+      const affinity = collapsed && user.id === authorId ? "after" : "before";
       return {
         ...user,
         selection: {
           ...user.selection,
-          start: mapOffsetThroughOperation(user.selection.start, operation),
-          end: mapOffsetThroughOperation(user.selection.end, operation),
+          start: mapOffsetThroughOperation(user.selection.start, operation, collapsed ? affinity : "before"),
+          end: mapOffsetThroughOperation(user.selection.end, operation, collapsed ? affinity : "after"),
         },
       };
     });
+  }
+
+  function outstandingLocalOperations() {
+    return [state.inFlight, ...state.pending].filter(Boolean).map((entry) => entry.operation);
+  }
+
+  function selectionInServerSource(selection) {
+    return editorSync.mapSelectionBackwardThroughOperations(selection, outstandingLocalOperations());
+  }
+
+  function selectionInLocalSource(selection) {
+    return editorSync.mapSelectionThroughOperations(selection, outstandingLocalOperations(), "before");
   }
 
   function refreshCollaborators() {
@@ -1232,11 +1228,17 @@
     };
   }
 
-  function restoreRawSelection(selection) {
+  function restoreRawSelection(selection, operation = null) {
     if (!selection) return;
     const previousSource = typeof selection.source === "string" ? selection.source : state.source;
-    const start = clamp(mapOffsetBetweenTexts(previousSource, state.source, selection.start), 0, state.source.length);
-    const end = clamp(mapOffsetBetweenTexts(previousSource, state.source, selection.end), 0, state.source.length);
+    const mapped = operation && previousSource !== state.source
+      ? editorSync.mapSelectionThroughOperations({ start: selection.start, end: selection.end }, [operation], "before")
+      : {
+        start: mapOffsetBetweenTexts(previousSource, state.source, selection.start),
+        end: mapOffsetBetweenTexts(previousSource, state.source, selection.end),
+      };
+    const start = clamp(mapped.start, 0, state.source.length);
+    const end = clamp(mapped.end, 0, state.source.length);
     editor.setSelectionRange(start, end);
     editor.scrollTop = selection.scrollTop;
     editor.scrollLeft = selection.scrollLeft;
@@ -1378,7 +1380,7 @@
   }
 
   function receiveOperation(message) {
-    transformCollaboratorSelections(message.operation, "wmd");
+    transformCollaboratorSelections(message.operation, "wmd", message.clientId);
     state.serverSource = applyOperation(state.serverSource, message.operation);
     state.revision = message.revision;
 
@@ -1402,17 +1404,20 @@
         return { ...entry, operation: localOperation };
       });
       trackCanvasExternalOperation(incoming);
+      transformHistoryThroughOperation(incoming);
+      state.updateOrigin = UPDATE_ORIGIN.REMOTE;
       state.source = applyOperation(state.source, incoming);
-      resetHistory();
       if (state.canvasSelection && state.mode === "document") state.restoreCanvasSelection = true;
       state.dirty = Boolean(state.pending.length || state.inFlight);
       renderSource();
-      restoreRawSelection(rawSelection);
+      restoreRawSelection(rawSelection, incoming);
       persistDraft();
       if (state.mode === "document") scheduleDocumentCanvasRefresh();
       else scheduleCompile(140);
       saveStatus.textContent = "Updated by a collaborator";
+      state.updateOrigin = null;
     } catch (_) {
+      state.updateOrigin = null;
       requestRefresh();
     }
   }
@@ -1422,21 +1427,34 @@
     const previousSource = state.source;
     const operation = operationFromDiff(previousSource, nextSource);
     if (options.canvas !== true) trackCanvasExternalOperation(operation);
+    const origin = options.origin || UPDATE_ORIGIN.WMD;
     if (options.history !== false) recordHistory(previousSource, options);
+    state.updateOrigin = origin;
     state.source = nextSource;
     state.dirty = true;
-    if (operation && state.ready) state.pending.push({ id: createId(), operation });
+    if (operation && state.ready) state.pending.push({ id: createId(), operation, origin });
     renderSource({ keepEditor: Boolean(options.keepEditor) });
     scheduleDraftSave();
     saveStatus.textContent = state.ready ? "Saving changes..." : "Saved locally - waiting for server";
     flushOperations();
     if (options.compile !== false) scheduleCompile();
+    state.updateOrigin = null;
   }
 
   function resetHistory() {
     state.history.undo = [];
     state.history.redo = [];
     state.history.lastAt = 0;
+  }
+
+  function transformHistoryStack(stack, currentSource, incoming) {
+    stack.splice(0, stack.length, ...editorSync.transformSnapshotStack(stack, currentSource, incoming));
+  }
+
+  function transformHistoryThroughOperation(operation) {
+    if (!operation) return;
+    transformHistoryStack(state.history.undo, state.source, operation);
+    transformHistoryStack(state.history.redo, state.source, operation);
   }
 
   function recordHistory(source, options = {}) {
@@ -1460,7 +1478,7 @@
     const nextSource = from.pop();
     to.push(state.source);
     state.history.lastAt = 0;
-    changeSource(nextSource, { compile: true, keepEditor: state.mode === "wmd", history: false });
+    changeSource(nextSource, { compile: true, keepEditor: state.mode === "wmd", history: false, origin: UPDATE_ORIGIN.HISTORY });
   }
 
   function flushOperations() {
@@ -1471,6 +1489,7 @@
       baseRevision: state.revision,
       clientOperationId: state.inFlight.id,
       operation: state.inFlight.operation,
+      origin: state.inFlight.origin,
     });
     watchInFlightOperation(state.inFlight);
   }
@@ -1508,11 +1527,28 @@
         return;
       }
       if (state.mode === "document") {
-        const canvasRenderId = createId();
-        state.canvasRenderId = canvasRenderId;
-        state.canvasSource = source;
-        state.canvasExternalOperations = [];
-        preview.srcdoc = editableCanvasHtml(themedHtml(result.html), canvasRenderId);
+        const rendered = themedHtml(result.html);
+        if (state.canvasRenderId && typeof state.canvasSource === "string" && preview.contentWindow) {
+          const parserOperation = editorSync.operationFromTextDiff(state.canvasSource, source);
+          const parsed = new DOMParser().parseFromString(rendered, "text/html");
+          const nextMain = parsed.querySelector("main");
+          postCanvas({
+            type: "source-update",
+            origin: UPDATE_ORIGIN.PARSER,
+            html: nextMain ? nextMain.innerHTML : "",
+            operation: parserOperation,
+            sourceLength: source.length,
+          });
+          sendCanvasState();
+          state.canvasSource = source;
+          state.canvasExternalOperations = [];
+        } else {
+          const canvasRenderId = createId();
+          state.canvasRenderId = canvasRenderId;
+          state.canvasSource = source;
+          state.canvasExternalOperations = [];
+          preview.srcdoc = editableCanvasHtml(rendered, canvasRenderId);
+        }
       } else {
         preview.srcdoc = themedHtml(result.html);
       }
@@ -1687,12 +1723,41 @@
   main.contentEditable = 'true';
   main.spellcheck = true;
   main.classList.add('wmd-studio-editable');
-  document.querySelectorAll('.tab-title').forEach(function(title) {
-    var duplicate = title.nextElementSibling;
-    if (duplicate && duplicate.tagName === 'H1' && duplicate.textContent.trim() === title.textContent.trim()) {
-      duplicate.classList.add('wmd-studio-duplicate-title');
-    }
-  });
+
+  function hydrateSourceMarkers(root) {
+    var walker = document.createTreeWalker(root, NodeFilter.SHOW_COMMENT);
+    var comments = [];
+    var comment = walker.nextNode();
+    while (comment) { comments.push(comment); comment = walker.nextNode(); }
+    comments.forEach(function(marker) {
+      var match = String(marker.data || '').match(/^wmd-source:(\\d+):(\\d+):(.+)$/);
+      if (!match) return;
+      var element = marker.nextSibling;
+      while (element && element.nodeType !== Node.ELEMENT_NODE) element = element.nextSibling;
+      if (element) {
+        element.dataset.wmdSourceStart = match[1];
+        element.dataset.wmdSourceEnd = match[2];
+        element.dataset.wmdSourceKey = match[3];
+        var section = element.closest('.tab-section');
+        var top = element;
+        while (section && top.parentElement !== section) top = top.parentElement;
+        if (section && top.dataset.wmdSourceStart === undefined) {
+          top.dataset.wmdSourceStart = match[1];
+          top.dataset.wmdSourceEnd = match[2];
+          top.dataset.wmdSourceKey = match[3];
+        }
+      }
+      marker.remove();
+    });
+  }
+  hydrateSourceMarkers(main);
+  function hideDuplicateTitles(root) {
+    (root || document).querySelectorAll('.tab-title').forEach(function(title) {
+      var duplicate = title.nextElementSibling;
+      if (duplicate && duplicate.tagName === 'H1' && duplicate.textContent.trim() === title.textContent.trim()) duplicate.classList.add('wmd-studio-duplicate-title');
+    });
+  }
+  hideDuplicateTitles(document);
 
   function activateSection(section) {
     if (!section) return;
@@ -1783,10 +1848,12 @@
 
   function setupEditableHeadingCollapse(heading, section) {
     if (!heading || !/^H[1-6]$/.test(heading.tagName) || heading.classList.contains('tab-title')) return heading;
+    if (heading.dataset.wmdStudioHeadingReady === 'true') return heading;
     // Clone compiler-rendered headings so their click handlers cannot intercept text editing.
     var editableHeading = heading.cloneNode(true);
     heading.replaceWith(editableHeading);
     editableHeading.classList.remove('collapsible-heading');
+    editableHeading.dataset.wmdStudioHeadingReady = 'true';
     editableHeading.dataset.collapsed = 'false';
     editableHeading.querySelectorAll('.heading-collapse-marker, .wmd-studio-heading-toggle').forEach(function(marker) { marker.remove(); });
     var toggle = document.createElement('button');
@@ -1868,6 +1935,70 @@
     return { start: Math.min(anchor, focus), end: Math.max(anchor, focus), preset: selectedPresetId() };
   }
 
+  var pendingEditScope = null;
+  var applyingSourceUpdate = false;
+
+  function directEditableBlock(node) {
+    var element = node && (node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement);
+    var section = element && element.closest('.tab-section');
+    if (!section) return null;
+    while (element && element.parentElement !== section) element = element.parentElement;
+    return element && element.dataset.wmdSourceStart !== undefined ? element : null;
+  }
+
+  function beginEditScope() {
+    if (pendingEditScope || applyingSourceUpdate) return;
+    var selection = window.getSelection();
+    if (!selection || !selection.rangeCount) return;
+    var first = directEditableBlock(selection.anchorNode);
+    var last = directEditableBlock(selection.focusNode);
+    if (!first || !last || first.parentElement !== last.parentElement) return;
+    var container = first.parentElement;
+    var children = Array.prototype.slice.call(container.children);
+    var firstIndex = children.indexOf(first);
+    var lastIndex = children.indexOf(last);
+    if (lastIndex < firstIndex) {
+      var swap = firstIndex;
+      firstIndex = lastIndex;
+      lastIndex = swap;
+    }
+    var selected = children.slice(firstIndex, lastIndex + 1);
+    var mapped = selected.filter(function(element) { return element.dataset.wmdSourceStart !== undefined; });
+    if (!mapped.length) return;
+    pendingEditScope = {
+      start: Math.min.apply(Math, mapped.map(function(element) { return Number(element.dataset.wmdSourceStart); })),
+      end: Math.max.apply(Math, mapped.map(function(element) { return Number(element.dataset.wmdSourceEnd); })),
+      container: container,
+      previous: children[firstIndex - 1] || null,
+      next: children[lastIndex + 1] || null,
+      beforeHtml: selected.map(function(element) { return element.outerHTML; }).join(''),
+    };
+  }
+
+  function beginDocumentEndInsertion() {
+    var children = Array.prototype.slice.call(main.children);
+    pendingEditScope = {
+      start: Number(main.dataset.wmdSourceEnd) || 0,
+      end: Number(main.dataset.wmdSourceEnd) || 0,
+      container: main,
+      previous: children[children.length - 1] || null,
+      next: null,
+      beforeHtml: '',
+    };
+  }
+
+  function finishEditScope() {
+    var scope = pendingEditScope;
+    if (!scope) return null;
+    var nodes = [];
+    var node = scope.previous ? scope.previous.nextElementSibling : scope.container.firstElementChild;
+    while (node && node !== scope.next) {
+      nodes.push(node);
+      node = node.nextElementSibling;
+    }
+    return { start: scope.start, end: scope.end, beforeHtml: scope.beforeHtml, afterHtml: nodes.map(function(element) { return element.outerHTML; }).join('') };
+  }
+
   function findMacro(before) {
     return macros.filter(function(macro) { return macro.trigger && before.endsWith(macro.trigger); }).sort(function(a, b) { return b.trigger.length - a.trigger.length; })[0];
   }
@@ -1889,8 +2020,15 @@
   }
 
   function notifyInput() {
+    if (applyingSourceUpdate) return;
+    var edit = finishEditScope();
+    pendingEditScope = null;
+    if (!edit) {
+      post('selection', selectionInfo());
+      return;
+    }
     refreshSidebarNavigation();
-    post('input', { html: main.innerHTML, selection: selectionInfo(), text: canonicalCanvasText() });
+    post('input', { edit: edit, selection: selectionInfo(), text: canonicalCanvasText() });
   }
 
   function clearCursors() { document.querySelectorAll('.wmd-studio-cursor').forEach(function(cursor) { cursor.remove(); }); }
@@ -2328,6 +2466,8 @@
 
   function command(data) {
     main.focus();
+    if (data.command === 'insert' && data.kind === 'tab') beginDocumentEndInsertion();
+    else beginEditScope();
     if (data.command === 'insert') {
       if (data.kind === 'link') {
         var href = data.value && data.value.internalTarget
@@ -2379,10 +2519,11 @@
       input.disabled = false;
       input.contentEditable = 'false';
       input.dataset.wmdStudioReady = 'true';
-      input.addEventListener('change', notifyInput);
+      input.addEventListener('change', function() { beginEditScope(); notifyInput(); });
     });
   }
 
+  main.addEventListener('beforeinput', beginEditScope);
   main.addEventListener('input', function() { expandMacro(); notifyInput(); });
   setupTaskCheckboxes();
   main.addEventListener('click', function(event) { event.stopPropagation(); post('selection', selectionInfo()); }, true);
@@ -2410,6 +2551,7 @@
   main.addEventListener('keyup', function() { post('selection', selectionInfo()); });
   main.addEventListener('keydown', function(event) {
     if (event.key === 'Enter' && !event.isComposing) {
+      beginEditScope();
       if (event.shiftKey) {
         event.preventDefault();
         document.execCommand('insertLineBreak');
@@ -2449,14 +2591,129 @@
   window.addEventListener('scroll', function() {
     post('scroll', { left: window.scrollX, top: window.scrollY });
   }, { passive: true });
+
+  function operationBounds(operation) {
+    if (!operation) return null;
+    var oldPosition = 0;
+    var newPosition = 0;
+    var bounds = { oldStart: Infinity, oldEnd: -Infinity, newStart: Infinity, newEnd: -Infinity };
+    (operation.ops || []).forEach(function(part) {
+      if (typeof part === 'string') {
+        bounds.oldStart = Math.min(bounds.oldStart, oldPosition);
+        bounds.oldEnd = Math.max(bounds.oldEnd, oldPosition);
+        bounds.newStart = Math.min(bounds.newStart, newPosition);
+        newPosition += part.length;
+        bounds.newEnd = Math.max(bounds.newEnd, newPosition);
+      } else if (part > 0) {
+        oldPosition += part;
+        newPosition += part;
+      } else if (part < 0) {
+        bounds.oldStart = Math.min(bounds.oldStart, oldPosition);
+        bounds.newStart = Math.min(bounds.newStart, newPosition);
+        oldPosition += -part;
+        bounds.oldEnd = Math.max(bounds.oldEnd, oldPosition);
+        bounds.newEnd = Math.max(bounds.newEnd, newPosition);
+      }
+    });
+    return Number.isFinite(bounds.oldStart) ? bounds : null;
+  }
+
+  function mappedDirectChildren(section) {
+    return Array.prototype.slice.call(section.children).filter(function(element) { return element.dataset.wmdSourceStart !== undefined; });
+  }
+
+  function overlapsSource(element, start, end) {
+    var elementStart = Number(element.dataset.wmdSourceStart);
+    var elementEnd = Number(element.dataset.wmdSourceEnd);
+    return elementStart <= end && elementEnd >= start;
+  }
+
+  function copySourceMapping(target, source) {
+    ['wmdSourceStart', 'wmdSourceEnd', 'wmdSourceKey'].forEach(function(name) {
+      if (source.dataset[name] === undefined) delete target.dataset[name];
+      else target.dataset[name] = source.dataset[name];
+    });
+  }
+
+  function mapCanvasOffset(before, after, offset) {
+    var position = Math.max(0, Math.min(Number(offset) || 0, before.length));
+    var prefix = 0;
+    while (prefix < before.length && prefix < after.length && before[prefix] === after[prefix]) prefix += 1;
+    var suffix = 0;
+    while (suffix < before.length - prefix && suffix < after.length - prefix && before[before.length - 1 - suffix] === after[after.length - 1 - suffix]) suffix += 1;
+    if (position <= prefix) return position;
+    if (position >= before.length - suffix) return after.length - (before.length - position);
+    return prefix + Math.min(after.length - prefix - suffix, position - prefix);
+  }
+
+  function applySourceUpdate(data) {
+    var parsed = new DOMParser().parseFromString('<main>' + String(data.html || '') + '</main>', 'text/html');
+    var nextMain = parsed.querySelector('main');
+    if (!nextMain) return;
+    hydrateSourceMarkers(nextMain);
+    var beforeText = canonicalCanvasText();
+    var selection = selectionInfo();
+    var bounds = operationBounds(data.operation);
+    var currentSections = Array.prototype.slice.call(main.querySelectorAll(':scope > section.tab-section'));
+    var nextSections = Array.prototype.slice.call(nextMain.querySelectorAll(':scope > section.tab-section'));
+    applyingSourceUpdate = true;
+    pendingEditScope = null;
+
+    if (currentSections.length !== nextSections.length) {
+      main.replaceChildren.apply(main, nextSections.map(function(section) { return document.importNode(section, true); }));
+    } else {
+      currentSections.forEach(function(section, sectionIndex) {
+        var nextSection = nextSections[sectionIndex];
+        var currentBlocks = mappedDirectChildren(section);
+        var nextBlocks = mappedDirectChildren(nextSection);
+        if (bounds) {
+          var affectedCurrent = currentBlocks.filter(function(element) { return overlapsSource(element, bounds.oldStart, bounds.oldEnd); });
+          var affectedNext = nextBlocks.filter(function(element) { return overlapsSource(element, bounds.newStart, bounds.newEnd); });
+          if (affectedCurrent.length) {
+            var marker = affectedCurrent[affectedCurrent.length - 1].nextSibling;
+            affectedCurrent.forEach(function(element) { element.remove(); });
+            affectedNext.forEach(function(element) { section.insertBefore(document.importNode(element, true), marker); });
+          } else if (affectedNext.length) {
+            var insertion = currentBlocks.find(function(element) { return Number(element.dataset.wmdSourceStart) >= bounds.oldStart; }) || null;
+            affectedNext.forEach(function(element) { section.insertBefore(document.importNode(element, true), insertion); });
+          }
+        }
+        section.dataset.tabName = nextSection.dataset.tabName || '';
+        section.dataset.tabHidden = nextSection.dataset.tabHidden || 'false';
+        copySourceMapping(section, nextSection);
+        var updatedBlocks = mappedDirectChildren(section);
+        mappedDirectChildren(nextSection).forEach(function(nextBlock, index) {
+          if (updatedBlocks[index]) copySourceMapping(updatedBlocks[index], nextBlock);
+        });
+      });
+    }
+    main.dataset.wmdSourceEnd = String(Number(data.sourceLength) || 0);
+    hideDuplicateTitles(main);
+    setupEditableHeadingCollapses();
+    setupTaskCheckboxes();
+    refreshSidebarNavigation();
+    var afterText = canonicalCanvasText();
+    restoreSelection({
+      start: mapCanvasOffset(beforeText, afterText, selection.start),
+      end: mapCanvasOffset(beforeText, afterText, selection.end),
+    });
+    applyingSourceUpdate = false;
+    post('source-updated', { text: afterText });
+  }
+
   window.addEventListener('message', function(event) {
     var data = event.data || {};
     if (data.channel !== 'wmd-studio-canvas') return;
+    if (data.type === 'source-update') {
+      applySourceUpdate(data);
+      return;
+    }
     if (data.type === 'state') {
       macros = Array.isArray(data.macros) ? data.macros : [];
       presets = Array.isArray(data.presets) ? data.presets : [];
       presetStyleElement.textContent = String(data.presetCss || '');
       canvas.style.zoom = String(Number(data.zoom) || 100) + '%';
+      document.body.classList.toggle('dark', data.theme === 'dark');
       restoreSelection(data.selection);
       if (data.scroll) {
         requestAnimationFrame(function() {
@@ -2471,26 +2728,22 @@
     if (data.type === 'command') command(data);
     if (data.type === 'cursors') clearCursors();
   });
-  post('ready', { html: main.innerHTML, text: canonicalCanvasText() });
+  post('ready', { text: canonicalCanvasText() });
 })();
 </script>`;
     return html.replace("</body>", `${bridge}</body>`);
   }
 
-  function canvasHtmlToWmd(html, baseSource = state.source) {
-    const documentFragment = new DOMParser().parseFromString(`<main>${html}</main>`, "text/html");
+  function canvasFragmentToWmd(html) {
+    const documentFragment = new DOMParser().parseFromString(`<main>${String(html || "")}</main>`, "text/html");
     const root = documentFragment.querySelector("main");
-    const sections = [...root.children].filter((child) => child.matches && child.matches("section.tab-section"));
-    if (!sections.length) return baseSource;
-    const preambleMatch = baseSource.match(/^[\s\S]*?(?=^@tab\b)/m);
-    const preamble = preambleMatch ? preambleMatch[0].trim() : "";
-    const tabs = sections.map((section) => {
-      const name = section.dataset.tabName || "Home";
-      const hidden = section.dataset.tabHidden === "true" ? " {hidden}" : "";
-      const blocks = [...section.children].map(serializeCanvasBlock).filter(Boolean);
-      return `@tab ${name}${hidden}\n${blocks.join("\n\n")}`;
-    });
-    return `${preamble}${preamble ? "\n\n" : ""}${tabs.join("\n\n")}\n`;
+    return [...root.children].map((element) => {
+      if (!element.matches("section.tab-section")) return serializeCanvasBlock(element);
+      const name = element.dataset.tabName || "Home";
+      const hidden = element.dataset.tabHidden === "true" ? " {hidden}" : "";
+      const blocks = [...element.children].map(serializeCanvasBlock).filter(Boolean);
+      return `@tab ${name}${hidden}${blocks.length ? `\n${blocks.join("\n\n")}` : ""}`;
+    }).filter(Boolean).join("\n\n");
   }
 
   function wrapCanvasStyle(element, markdown) {
@@ -2575,7 +2828,7 @@
       if (current.tagName === "BR") return "\n";
       return children;
     };
-    return [...node.childNodes].map(walk).join("").replace(/\u200b/g, "").trim();
+    return [...node.childNodes].map(walk).join("").replace(/\u200b/g, "").replace(/\u00a0/g, " ");
   }
 
   function renderWarnings(warnings) {
@@ -2632,7 +2885,9 @@
   }
 
   function renderHighlight() {
-    const users = state.users.filter((user) => user.id !== state.clientId && user.selection && user.selection.mode === "wmd");
+    const users = state.users
+      .filter((user) => user.id !== state.clientId && user.selection && user.selection.mode === "wmd")
+      .map((user) => ({ ...user, selection: selectionInLocalSource(user.selection) }));
     let decorated = state.source;
     const markers = new Map();
     users.sort((left, right) => right.selection.end - left.selection.end).forEach((user, index) => {
@@ -2826,7 +3081,7 @@
     expandRawMacro();
     syncRawPreset();
     state.previewFocus = rawPreviewFocus();
-    changeSource(editor.value, { compile: true, keepEditor: true });
+    changeSource(editor.value, { compile: true, keepEditor: true, origin: UPDATE_ORIGIN.WMD });
   }
 
   function wrapRaw(marker) {
@@ -3289,7 +3544,8 @@
         syncRawPreset();
       }
       if (state.ready && state.mode === "wmd" && document.activeElement === editor) {
-        send({ type: "selection", mode: "wmd", start: editor.selectionStart, end: editor.selectionEnd });
+        const selection = selectionInServerSource({ start: editor.selectionStart, end: editor.selectionEnd });
+        send({ type: "selection", mode: "wmd", start: selection.start, end: selection.end, baseRevision: state.revision });
       }
     }, 90);
   }
@@ -3351,6 +3607,7 @@
       macros: settings.macros,
       presets: documentStylePresets(),
       presetCss: stylePresetCss(),
+      theme: resolvedTheme(),
       zoom: settings.zoom,
       selection,
       scroll: state.previewScroll,
@@ -3395,13 +3652,6 @@
     if (!message.canvasRenderId || message.canvasRenderId !== state.canvasRenderId) return;
     if (message.type === "ready") {
       const nextText = String(message.text || "");
-      const compiledCanvasSource = typeof state.canvasSource === "string" ? state.canvasSource : state.source;
-      const serializedCanvasSource = message.html ? canvasHtmlToWmd(String(message.html), compiledCanvasSource) : compiledCanvasSource;
-      const canvasBridge = operationFromDiff(serializedCanvasSource, compiledCanvasSource);
-      if (canvasBridge) {
-        state.canvasSource = serializedCanvasSource;
-        state.canvasExternalOperations = [canvasBridge, ...state.canvasExternalOperations];
-      }
       const previousText = typeof state.canvasText === "string" ? state.canvasText : null;
       if (previousText !== null && previousText !== nextText) remapCanvasSelections(previousText, nextText);
       if (state.restoreCanvasSelection && state.canvasSelection && previousText !== null) {
@@ -3425,15 +3675,23 @@
         setActivePreset(message.selection.preset);
       }
       const canvasBase = typeof state.canvasSource === "string" ? state.canvasSource : state.source;
-      const nextCanvasSource = canvasHtmlToWmd(String(message.html || ""), canvasBase);
-      const canvasOperation = operationFromDiff(canvasBase, nextCanvasSource);
+      const edit = message.edit && typeof message.edit === "object" ? message.edit : null;
+      if (!edit) {
+        state.restoreCanvasSelection = true;
+        scheduleCompile(0);
+        return;
+      }
+      const beforeWmd = canvasFragmentToWmd(edit.beforeHtml);
+      const afterWmd = canvasFragmentToWmd(edit.afterHtml);
+      const canvasOperation = editorSync.operationForSerializedRange(canvasBase, edit, beforeWmd, afterWmd);
       if (canvasOperation) {
         try {
+          const nextCanvasSource = applyOperation(canvasBase, canvasOperation);
           const rebased = rebaseCanvasOperation(canvasOperation);
           const nextSource = applyOperation(state.source, rebased.operation);
           state.canvasSource = nextCanvasSource;
           state.canvasExternalOperations = rebased.externalOperations;
-          changeSource(nextSource, { compile: false, canvas: true });
+          changeSource(nextSource, { compile: false, canvas: true, origin: UPDATE_ORIGIN.DOCUMENT });
           if (state.canvasExternalOperations.length) scheduleDocumentCanvasRefresh();
         } catch (_) {
           state.restoreCanvasSelection = true;
