@@ -2,6 +2,11 @@ const fs = require("fs");
 const http = require("http");
 const path = require("path");
 const MarkdownIt = require("markdown-it");
+const {
+  parseWmd: parseWmdAst,
+  renderWmdAst,
+  stringifyWmd,
+} = require("./wmd-ast");
 
 const DEFAULT_INPUT_PATH = "example.wmd";
 const DEFAULT_OUTPUT_PATH = "output.html";
@@ -688,7 +693,7 @@ function createTab(name, hidden, sourceStart = 0, headerRange = null) {
   };
 }
 
-function parseWmd(source) {
+function parseCompilerWmd(source) {
   const sourceText = String(source || "");
   const records = sourceLineRecords(sourceText);
   const lines = records.map((record) => record.text);
@@ -1909,7 +1914,12 @@ ${finalWarnings.map((warning) => `<p>${escapeHtml(warning)}</p>`).join("\n")}
 
 function compile(source) {
   const md = makeMarkdownIt();
-  const { config, vars, tabs } = parseWmd(source);
+  // Keep the renderer's mature Markdown-It pipeline, but parse the source into
+  // the shared WikiMD AST as well.  The editor and collaboration server use
+  // that AST for structured transactions; this legacy view remains the stable
+  // compiler surface for generated documents.
+  const ast = parseWmdAst(source);
+  const { config, vars, tabs } = parseCompilerWmd(source);
   const warnings = [];
   const tabsBySlug = finalizeTabs(tabs, warnings);
 
@@ -1922,7 +1932,7 @@ function compile(source) {
     tab.headings = collectHeadings(md, tab, config);
   }
 
-  return buildHtml(config, tabs, warnings, String(source || "").length);
+  return { ...buildHtml(config, tabs, warnings, String(source || "").length), ast };
 }
 
 function ensureParentDirectory(filePath) {
@@ -2320,8 +2330,11 @@ module.exports = {
   DEFAULT_PORT,
   compile,
   compileFile,
+  parseWmd: parseWmdAst,
   parseArgs,
+  renderWmdAst,
   startPreviewServer,
+  stringifyWmd,
   watchFile,
 };
 
