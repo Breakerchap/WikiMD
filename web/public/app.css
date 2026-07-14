@@ -352,6 +352,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .document-toolbar button, .document-toolbar select { min-height: 32px; border: 1px solid transparent; border-radius: 6px; padding: 5px 8px; color: var(--muted); background: transparent; font-size: 0.78rem; white-space: nowrap; }
 .document-toolbar select { min-width: 90px; border-color: var(--line); background: var(--canvas); }
 .document-toolbar button:hover { color: var(--pine-dark); background: var(--mint); }
+.document-toolbar button[aria-pressed="true"], .document-toolbar button.format-active { color: var(--paper); background: var(--pine); border-color: var(--pine-dark); }
 .document-toolbar .underline-button { text-decoration: underline; text-underline-offset: 2px; }
 .document-toolbar .strike-button { text-decoration: line-through; text-decoration-thickness: 1.5px; }
 .toolbar-divider { height: 21px; width: 1px; margin: 0 3px; background: var(--line); }

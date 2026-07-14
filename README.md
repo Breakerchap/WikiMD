@@ -11,7 +11,9 @@ npm run build
 npm run watch
 npm run serve
 npm run dev
+npm run web
 npm test
+npm run test:stress
 ```
 
 - `build` compiles the file you pass in, or defaults to `example.wmd -> output.html`
@@ -28,63 +30,17 @@ node wmd-compiler.js --serve
 node --test
 ```
 
-## Web editor branch
+## WMD workspace
 
-The `web-editor` branch adds a local, collaborative browser editor without changing the normal compiler workflow on `main`.
+Run `npm run web` and open `http://127.0.0.1:4313` for the WMD source editor and compiled preview. It includes syntax highlighting, formatting shortcuts, style presets, tabs, callouts, find/replace, MD/WMD/DOCX import, document management, local recovery drafts, and `.wmd` downloads.
 
-```bash
-git switch web-editor
-node web/server.js
-```
+Switch between the raw WMD source and a Google-Docs-style Document mode. Document mode formats selections through the toolbar or keyboard shortcuts while keeping WMD as the canonical shared source and recompiling as you type.
 
-Then open `http://127.0.0.1:4313`. It opens in an editable version of the actual compiled document, with a toggle to syntax-highlighted raw WMD. The Docs-style toolbar provides document style, font, size, zoom, formatting, links, images, headings, lists, callouts, tabs, and undo/redo. The workspace also has resizable/hideable panes, MD/WMD/DOCX import, and `.wmd` downloads.
+Up to eight people can edit the same document simultaneously in either mode, with live cursors and reconnect-safe operation replay.
 
-Settings are stored per browser and include your username, cursor color, global theme, main color palette, default editor mode, and text macros such as `--` becoming an en dash. Document styles now live in the WMD `@config` block, so collaborators get the same shortcuts and formatting. Select a Title, Heading, Normal Text, or custom-styled block to change its shared font, size, block type, callout type, checklist/list behaviour, highlight, and formatting from the toolbar; every block using that style updates together. The `Style` toolbar button creates or edits config-backed styles and can record a keybind by clicking **Record** and pressing the shortcut. Use `++underlined text++` for persistent WMD underline.
+For other people on your local network, run `npm run web:lan`, open the LAN address printed in the terminal, then use **Invite** to copy the current document link. Only share the server on a network you trust; the workspace does not include accounts or permissions.
 
-Style presets use readable config lines:
-
-```wmd
-@config
-Title: {keybind: Ctrl+Shift+`; size: 3rem; font: Arial; bold: true; heading: 1};
-Heading 1: {keybind: Ctrl+Shift+1; size: 2rem; font: Arial; bold: true; heading: 1};
-Italic List: {keybind: Ctrl+Alt+L; italic: true; unordered-list: true};
-Warning Box: {keybind: Ctrl+Alt+W; callout: warning; bold: true};
-@endconfig
-```
-
-Custom style assignments are preserved with a start marker and the shorter `@end` marker:
-
-```wmd
-@style Warning Box
-Remember the dragon's reaction.
-@end
-```
-
-Saved browser documents live in `web/data/`, which is intentionally ignored by Git. The browser also keeps a local recovery copy for every document and sync server, so an edit made while offline is restored after a refresh or reconnect.
-
-For collaborators on your local network, start the server with `node web/server.js --host 0.0.0.0` (or `npm run web:lan`) and share your computer's LAN address, such as `http://192.168.1.20:4313/?doc=team-notes`. This editor intentionally has no sign-in system yet, so only use LAN mode on a network you trust.
-
-For people on different networks, run the same server on an HTTPS-accessible host or behind a secure tunnel, then open and share that public editor URL. The server accepts cross-origin sync requests, so a local editor can also connect through **Settings -> Sync server URL**. When launching behind a public address, this prints the intended share base in the terminal:
-
-```bash
-node web/server.js --host 0.0.0.0 --public-url https://docs.example.com
-```
-
-The public host must provide its own access control (for example, a VPN, authenticated reverse proxy, or a private tunnel) before it is shared outside a trusted group. WMD Studio does not yet include accounts or document permissions.
-
-### Quick internet sharing
-
-`ngrok` is available on this Windows machine, so you can share a temporary HTTPS link without changing router settings:
-
-```powershell
-# Terminal 1: keep the editor running
-npm run web
-
-# Terminal 2: create the public URL, then share the https:// address it prints
-npm run web:share
-```
-
-The link works only while both terminals remain open. If ngrok asks for an auth token, follow its one-time setup prompt, then run `npm run web:share` again. For a longer-lived shared editor, use a named tunnel or an HTTPS host with access control.
+To share over the internet, keep `npm run web` running in one terminal and run `npm run web:share` in another. Share the HTTPS address printed by ngrok.
 
 You can also point the compiler at another file:
 

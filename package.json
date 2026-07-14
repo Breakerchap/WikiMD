@@ -11,7 +11,8 @@
     "web:dev": "node ./web/server.js",
     "web:lan": "node ./web/server.js --host 0.0.0.0",
     "web:share": "ngrok http 4313",
-    "test": "node --test"
+    "test": "node --test",
+    "test:stress": "node --test test/web-editor.test.js test/document-editor.test.js"
   },
   "keywords": [],
   "author": "",

@@ -2,7 +2,6 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 
 const { compile, parseArgs } = require("../wmd-compiler.js");
-const { parseOptions } = require("../web/server.js");
 
 test("parseArgs supports positional files and serve mode", () => {
   const options = parseArgs(["--serve", "notes.wmd", "notes.html", "--port", "4500"]);
@@ -129,18 +128,6 @@ test("WMD tables compile to semantic table markup", () => {
   assert.match(result.html, /<table>/);
   assert.match(result.html, /<th>Name<\/th>/);
   assert.match(result.html, /<td>Ada<\/td>/);
-});
-
-test("web server options support LAN and a public editor URL", () => {
-  const options = parseOptions([
-    "--host", "0.0.0.0",
-    "--port", "4510",
-    "--public-url", "https://docs.example.com/workspace",
-  ]);
-
-  assert.equal(options.host, "0.0.0.0");
-  assert.equal(options.port, 4510);
-  assert.equal(options.publicUrl, "https://docs.example.com");
 });
 
 test("config-defined custom heading markers compile and style headings", () => {

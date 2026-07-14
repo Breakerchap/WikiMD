@@ -41,27 +41,27 @@
           <span>WMD Studio</span>
         </div>
         <div class="document-identity">
-          <span class="document-label">Shared document</span>
+          <span class="document-label">WMD document</span>
           <strong id="documentName">Loading...</strong>
         </div>
         <div class="mode-switch" role="group" aria-label="Editor mode">
-          <button id="documentModeButton" type="button" aria-pressed="true">Document</button>
-          <button id="wmdModeButton" type="button" aria-pressed="false">WMD</button>
+          <button id="documentModeButton" type="button" aria-pressed="false">Document</button>
+          <button id="wmdModeButton" type="button" aria-pressed="true">WMD</button>
         </div>
         <div class="topbar-actions">
-          <span class="connection-status" id="connectionStatus">Connecting</span>
+          <span class="connection-status" id="connectionStatus">Loading</span>
           <button class="quiet-button" id="documentsButton" type="button">Documents</button>
           <button class="quiet-button" id="uploadButton" type="button">Upload</button>
           <input id="importInput" type="file" accept=".md,.markdown,.wmd,.docx" hidden>
           <button class="quiet-button" id="renameButton" type="button">Rename</button>
           <button class="quiet-button" id="panelsButton" type="button" aria-expanded="false">Panels</button>
           <button class="quiet-button" id="settingsButton" type="button">Settings</button>
-          <button class="quiet-button" id="shareButton" type="button">Share</button>
+          <button class="quiet-button" id="shareButton" type="button">Invite</button>
           <button class="primary-button" id="downloadButton" type="button">Download .wmd</button>
         </div>
       </header>
 
-      <section class="document-toolbar" aria-label="Document controls">
+      <section class="document-toolbar" aria-label="Formatting controls">
         <select id="blockStyleControl" aria-label="Paragraph style" title="Paragraph style">
           <option value="p">Normal text</option>
         </select>
@@ -91,6 +91,7 @@
         <button class="underline-button" data-command="underline" type="button" title="Underline">U</button>
         <button class="strike-button" data-command="strikeThrough" type="button" title="Strikethrough">S</button>
         <button data-command="highlight" type="button" title="Highlight">Pen</button>
+        <button data-command="code" type="button" title="Inline code">Code</button>
         <button id="stylePresetButton" type="button" title="Create or edit the selected style">Style</button>
         <span class="toolbar-divider"></span>
         <button data-insert="link" type="button" title="Insert link (Ctrl+K)">Link</button>
@@ -106,11 +107,11 @@
         <button data-document-command="zoom-out" type="button" title="Zoom out">-</button>
         <button class="zoom-control" id="zoomControl" type="button" title="Reset zoom">100%</button>
         <button data-document-command="zoom-in" type="button" title="Zoom in">+</button>
-        <button class="mobile-preview-button" id="mobilePreviewButton" type="button">Document</button>
+        <button class="mobile-preview-button" id="mobilePreviewButton" type="button">Preview</button>
       </section>
 
       <div class="workspace-meta">
-        <div class="presence" id="presence" aria-label="People editing this document"></div>
+        <div class="presence" id="presence" aria-label="People editing this WMD document"></div>
         <div class="editor-status">
           <span id="wordCount">0 words</span>
           <span id="localSaveStatus">Local copy ready</span>
@@ -131,7 +132,7 @@
       <section class="workspace" id="workspace">
         <section class="editor-zone pane" id="editorPane">
           <div class="editor-surface">
-            <div class="raw-editor-shell" id="rawEditorShell" hidden>
+            <div class="raw-editor-shell" id="rawEditorShell">
               <pre class="wmd-highlight" id="wmdHighlight" aria-hidden="true"><code></code></pre>
               <textarea id="editor" class="source-editor" wrap="soft" spellcheck="true" autocapitalize="off" autocomplete="off" aria-label="WMD source editor" placeholder="Write WMD here..."></textarea>
               <div class="editor-hint">Source mode has WMD highlighting, smart pairs, macros, and live compiler warnings.</div>
@@ -168,12 +169,8 @@
           </div>
           <button class="icon-button settings-close" value="cancel" aria-label="Close settings" type="submit">x</button>
         </div>
-        <label class="setting-field">Username
+        <label class="setting-field">Display name
           <input id="usernameInput" maxlength="36" autocomplete="nickname" placeholder="Your name">
-        </label>
-        <label class="setting-field">Sync server URL
-          <input id="syncUrlInput" type="url" inputmode="url" placeholder="Use this page's server">
-          <span class="setting-help">Leave blank for this server. Enter a public WMD Studio deployment to collaborate from different networks.</span>
         </label>
         <label class="setting-field">Cursor color
           <input id="cursorColorInput" type="color" value="#3f7f6b">
@@ -211,6 +208,24 @@
         <div class="settings-actions">
           <button class="quiet-button" value="cancel" type="submit">Cancel</button>
           <button class="primary-button" id="saveSettingsButton" value="default" type="submit">Save settings</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog class="share-dialog" id="shareDialog">
+      <form method="dialog" id="shareForm">
+        <div class="settings-heading">
+          <div>
+            <span class="eyebrow">Live WMD editing</span>
+            <h2>Invite editors</h2>
+          </div>
+          <button class="icon-button settings-close" value="cancel" aria-label="Close invite dialog" type="submit">x</button>
+        </div>
+        <p class="insert-dialog-description">Up to eight people can edit this document together in Document or WMD mode. Everyone must be able to reach this server.</p>
+        <input class="share-link-input" id="shareLinkInput" readonly aria-label="Document invitation link">
+        <div class="settings-actions">
+          <button class="quiet-button" id="selectShareLinkButton" type="button">Select link</button>
+          <button class="primary-button" id="copyShareLinkButton" type="button">Copy link</button>
         </div>
       </form>
     </dialog>
@@ -276,25 +291,8 @@
       </form>
     </dialog>
 
-    <dialog class="share-dialog" id="shareDialog">
-      <form method="dialog" id="shareForm">
-        <div class="settings-heading">
-          <div>
-            <span class="eyebrow">Collaboration</span>
-            <h2>Share document</h2>
-          </div>
-          <button class="icon-button settings-close" value="cancel" aria-label="Close share dialog" type="submit">x</button>
-        </div>
-        <p class="insert-dialog-description">Copy this link to let collaborators join this document.</p>
-        <input class="share-link-input" id="shareLinkInput" readonly aria-label="Collaboration link">
-        <div class="settings-actions">
-          <button class="quiet-button" id="selectShareLinkButton" type="button">Select link</button>
-          <button class="primary-button" id="copyShareLinkButton" type="button">Copy link</button>
-        </div>
-      </form>
-    </dialog>
-
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
+    <script src="/editor-core.js"></script>
     <script src="/app.js"></script>
   </body>
 </html>

@@ -13,8 +13,9 @@ const HOST = "127.0.0.1";
 const DEFAULT_PORT = 4313;
 const MAX_BODY_BYTES = 12 * 1024 * 1024;
 const MAX_SOCKET_BUFFER_BYTES = MAX_BODY_BYTES + 32;
-const HISTORY_LIMIT = 1_000;
-const MAX_HISTORY_BYTES = 2 * 1024 * 1024;
+const HISTORY_LIMIT = 5_000;
+const MAX_HISTORY_BYTES = 16 * 1024 * 1024;
+const MAX_COLLABORATORS = 8;
 const WEB_ROOT = __dirname;
 const PUBLIC_ROOT = path.join(WEB_ROOT, "public");
 const DATA_ROOT = path.join(WEB_ROOT, "data");
@@ -37,9 +38,10 @@ const DEFAULT_DOCUMENT_SOURCE = [
 ].join("\n");
 const clients = new Set();
 const documents = new Map();
+const documentEpochs = new Map();
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+  "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
   "Access-Control-Allow-Headers": "Content-Type",
 };
 
@@ -83,8 +85,10 @@ function readDocument(id) {
   const source = fs.existsSync(filePath)
     ? fs.readFileSync(filePath, "utf8")
     : createStarterDocument(normalizedId);
+  if (!documentEpochs.has(normalizedId)) documentEpochs.set(normalizedId, crypto.randomUUID());
   const document = {
     id: normalizedId,
+    epoch: documentEpochs.get(normalizedId),
     source,
     revision: 0,
     history: [],
@@ -131,6 +135,7 @@ function releaseDocumentIfUnused(documentId) {
   try {
     flushDocument(document);
     documents.delete(documentId);
+    documentEpochs.set(documentId, crypto.randomUUID());
   } catch (error) {
     // Do not discard a document if its final disk write did not succeed.
     console.error(`Could not release ${document.id}.wmd: ${error.message}`);
@@ -138,6 +143,9 @@ function releaseDocumentIfUnused(documentId) {
 }
 
 function normalizeOperations(operations) {
+  if (!Array.isArray(operations) || operations.length > 10_000) {
+    throw new Error("Text operations must be an array with at most 10,000 parts.");
+  }
   const result = [];
 
   for (const operation of operations || []) {
@@ -285,8 +293,36 @@ function operationByteLength(operation) {
   return Buffer.byteLength(JSON.stringify(operation), "utf8");
 }
 
+function findDuplicateOperation(history, clientId, clientOperationId) {
+  return (history || []).find((entry) => entry.clientId === clientId && entry.clientOperationId === clientOperationId) || null;
+}
+
+function mapOffsetThroughOperation(offset, operation) {
+  const sourceOffset = Math.max(0, Number(offset) || 0);
+  let consumed = 0;
+  let produced = 0;
+  for (const part of normalizeOperations(operation && operation.ops)) {
+    if (typeof part === "string") {
+      produced += part.length;
+    } else if (part > 0) {
+      if (sourceOffset <= consumed + part) return produced + Math.max(0, sourceOffset - consumed);
+      consumed += part;
+      produced += part;
+    } else {
+      const removed = -part;
+      if (sourceOffset <= consumed + removed) return produced;
+      consumed += removed;
+    }
+  }
+  return produced + Math.max(0, sourceOffset - consumed);
+}
+
 function sendSocketMessage(client, message) {
   if (!client.socket.writable) return;
+  if (client.socket.writableLength > MAX_SOCKET_BUFFER_BYTES) {
+    client.socket.destroy();
+    return;
+  }
   const payload = Buffer.from(JSON.stringify(message));
   const header = [];
 
@@ -307,6 +343,14 @@ function sendSocketMessage(client, message) {
 
 function documentClients(documentId) {
   return [...clients].filter((client) => client.documentId === documentId);
+}
+
+function hasRoomCapacity(activeCount) {
+  return Number.isInteger(activeCount) && activeCount >= 0 && activeCount < MAX_COLLABORATORS;
+}
+
+function hasCollaborationCapacity(documentId, joiningClient = null) {
+  return hasRoomCapacity(documentClients(documentId).filter((client) => client !== joiningClient).length);
 }
 
 function getPresence(documentId) {
@@ -333,21 +377,57 @@ function handleClientMessage(client, message) {
 
   if (message.type === "join") {
     const previousDocumentId = client.documentId;
-    const document = readDocument(message.documentId);
+    const documentId = normalizeDocumentId(message.documentId);
+    if (!hasCollaborationCapacity(documentId, client)) {
+      if (previousDocumentId && previousDocumentId !== documentId) {
+        client.documentId = null;
+        client.selection = null;
+        broadcastPresence(previousDocumentId);
+        releaseDocumentIfUnused(previousDocumentId);
+      }
+      sendSocketMessage(client, {
+        type: "capacity",
+        maxCollaborators: MAX_COLLABORATORS,
+        documentId,
+      });
+      return;
+    }
+    const document = readDocument(documentId);
     client.documentId = document.id;
     client.name = String(message.name || "Guest").slice(0, 36) || "Guest";
     client.color = normalizeColor(message.color);
     client.clientId = String(message.clientId || client.id).slice(0, 100);
     client.selection = null;
-    sendSocketMessage(client, {
-      type: "document",
-      document: {
-        id: document.id,
-        source: document.source,
+    const knownRevision = Number(message.revision);
+    const earliestRevision = document.history[0] ? document.history[0].revision - 1 : document.revision;
+    if (message.resume === true && message.epoch === document.epoch && Number.isInteger(knownRevision) && knownRevision >= earliestRevision && knownRevision <= document.revision) {
+      sendSocketMessage(client, {
+        type: "resume",
+        documentId: document.id,
+        epoch: document.epoch,
         revision: document.revision,
-        updatedAt: document.updatedAt,
-      },
-    });
+        operations: document.history.filter((entry) => entry.revision > knownRevision).map((entry) => ({
+          type: "operation",
+          documentId: document.id,
+          epoch: document.epoch,
+          clientId: entry.clientId,
+          clientOperationId: entry.clientOperationId,
+          operation: entry.operation,
+          revision: entry.revision,
+        })),
+      });
+    } else {
+      sendSocketMessage(client, {
+        type: "document",
+        document: {
+          id: document.id,
+          epoch: document.epoch,
+          source: document.source,
+          revision: document.revision,
+          updatedAt: document.updatedAt,
+        },
+      });
+    }
     if (previousDocumentId && previousDocumentId !== document.id) {
       broadcastPresence(previousDocumentId);
       releaseDocumentIfUnused(previousDocumentId);
@@ -361,12 +441,41 @@ function handleClientMessage(client, message) {
   if (message.type === "operation") {
     const document = readDocument(client.documentId);
     const baseRevision = Number(message.baseRevision);
+    const clientOperationId = String(message.clientOperationId || "").slice(0, 100);
     const earliestRevision = document.history[0] ? document.history[0].revision - 1 : document.revision;
+
+    if (message.epoch !== document.epoch) {
+      sendSocketMessage(client, {
+        type: "resync",
+        document: { id: document.id, epoch: document.epoch, source: document.source, revision: document.revision, updatedAt: document.updatedAt },
+      });
+      return;
+    }
+
+    if (!clientOperationId) {
+      sendSocketMessage(client, { type: "error", message: "Every edit needs an operation id." });
+      return;
+    }
+
+    const duplicate = findDuplicateOperation(document.history, client.clientId || client.id, clientOperationId);
+    if (duplicate) {
+      sendSocketMessage(client, {
+        type: "operation",
+        documentId: document.id,
+        epoch: document.epoch,
+        clientId: client.clientId || client.id,
+        clientOperationId,
+        operation: duplicate.operation,
+        revision: duplicate.revision,
+        duplicate: true,
+      });
+      return;
+    }
 
     if (!Number.isInteger(baseRevision) || baseRevision < earliestRevision || baseRevision > document.revision) {
       sendSocketMessage(client, {
         type: "resync",
-        document: { source: document.source, revision: document.revision },
+        document: { id: document.id, epoch: document.epoch, source: document.source, revision: document.revision, updatedAt: document.updatedAt },
       });
       return;
     }
@@ -380,23 +489,40 @@ function handleClientMessage(client, message) {
       document.source = nextSource;
       document.revision += 1;
       document.updatedAt = new Date().toISOString();
-      const historyEntry = { revision: document.revision, operation, bytes: operationByteLength(operation) };
+      const historyEntry = {
+        revision: document.revision,
+        operation,
+        clientId: client.clientId || client.id,
+        clientOperationId,
+        bytes: operationByteLength(operation),
+      };
       document.history.push(historyEntry);
       document.historyBytes += historyEntry.bytes;
-      while (document.history.length > HISTORY_LIMIT || document.historyBytes > MAX_HISTORY_BYTES) {
+      while (document.history.length > 1 && (document.history.length > HISTORY_LIMIT || document.historyBytes > MAX_HISTORY_BYTES)) {
         const expired = document.history.shift();
         document.historyBytes -= expired.bytes;
+      }
+      for (const connectedClient of documentClients(document.id)) {
+        if (!connectedClient.selection || connectedClient.selection.mode !== "wmd") continue;
+        connectedClient.selection.start = mapOffsetThroughOperation(connectedClient.selection.start, operation);
+        connectedClient.selection.end = mapOffsetThroughOperation(connectedClient.selection.end, operation);
       }
       scheduleSave(document);
       broadcast(document.id, {
         type: "operation",
+        documentId: document.id,
+        epoch: document.epoch,
         clientId: client.clientId || client.id,
-        clientOperationId: String(message.clientOperationId || ""),
+        clientOperationId,
         operation,
         revision: document.revision,
       });
     } catch (error) {
-      sendSocketMessage(client, { type: "error", message: error.message });
+      sendSocketMessage(client, {
+        type: "resync",
+        message: error.message,
+        document: { id: document.id, epoch: document.epoch, source: document.source, revision: document.revision, updatedAt: document.updatedAt },
+      });
     }
     return;
   }
@@ -430,6 +556,7 @@ function parseSocketFrames(client, chunk) {
 
   while (client.buffer.length >= 2) {
     const first = client.buffer[0];
+    const finalFragment = Boolean(first & 0x80);
     const second = client.buffer[1];
     const opcode = first & 0x0f;
     const masked = Boolean(second & 0x80);
@@ -469,7 +596,7 @@ function parseSocketFrames(client, chunk) {
       mask = client.buffer.subarray(payloadOffset, payloadOffset + 4);
       payloadOffset += 4;
     }
-    const payload = Buffer.from(client.buffer.subarray(payloadOffset, payloadOffset + payloadLength));
+    let payload = Buffer.from(client.buffer.subarray(payloadOffset, payloadOffset + payloadLength));
     client.buffer = client.buffer.subarray(frameLength);
     if (masked) {
       for (let index = 0; index < payload.length; index += 1) payload[index] ^= mask[index % 4];
@@ -483,7 +610,38 @@ function parseSocketFrames(client, chunk) {
       client.socket.write(Buffer.concat([Buffer.from([0x8a, payload.length]), payload]));
       continue;
     }
-    if (opcode !== 0x1) continue;
+    if (opcode === 0x0) {
+      if (client.fragmentOpcode !== 0x1) {
+        client.socket.destroy();
+        return;
+      }
+      client.fragments.push(payload);
+      client.fragmentBytes += payload.length;
+      if (client.fragmentBytes > MAX_BODY_BYTES) {
+        client.socket.destroy();
+        return;
+      }
+      if (!finalFragment) continue;
+      payload = Buffer.concat(client.fragments, client.fragmentBytes);
+      client.fragmentOpcode = null;
+      client.fragments = [];
+      client.fragmentBytes = 0;
+    } else if (opcode === 0x1) {
+      if (client.fragmentOpcode !== null) {
+        client.socket.destroy();
+        return;
+      }
+      if (!finalFragment) {
+        client.fragmentOpcode = 0x1;
+        client.fragments = [payload];
+        client.fragmentBytes = payload.length;
+        continue;
+      }
+    } else if (opcode === 0xa) {
+      continue;
+    } else {
+      continue;
+    }
 
     try {
       handleClientMessage(client, JSON.parse(payload.toString("utf8")));
@@ -522,11 +680,31 @@ function acceptWebSocket(request, socket) {
     color: "#3f7f6b",
     selection: null,
     buffer: Buffer.alloc(0),
+    fragmentOpcode: null,
+    fragments: [],
+    fragmentBytes: 0,
+    heartbeat: null,
+    idleTimer: null,
   };
+  const refreshIdleTimeout = () => {
+    clearTimeout(client.idleTimer);
+    client.idleTimer = setTimeout(() => socket.destroy(), 45_000);
+    client.idleTimer.unref?.();
+  };
+  client.heartbeat = setInterval(() => {
+    if (socket.writable) socket.write(Buffer.from([0x89, 0x00]));
+  }, 20_000);
+  client.heartbeat.unref?.();
+  refreshIdleTimeout();
   clients.add(client);
-  socket.on("data", (chunk) => parseSocketFrames(client, chunk));
+  socket.on("data", (chunk) => {
+    refreshIdleTimeout();
+    parseSocketFrames(client, chunk);
+  });
   socket.on("error", () => socket.destroy());
   socket.on("close", () => {
+    clearInterval(client.heartbeat);
+    clearTimeout(client.idleTimer);
     clients.delete(client);
     if (client.documentId) {
       broadcastPresence(client.documentId);
@@ -715,6 +893,7 @@ function createDocument(payload = {}) {
   const source = createStarterDocument(id);
   const document = {
     id,
+    epoch: crypto.randomUUID(),
     source,
     revision: 0,
     history: [],
@@ -722,9 +901,34 @@ function createDocument(payload = {}) {
     updatedAt: new Date().toISOString(),
     saveTimer: null,
   };
+  documentEpochs.set(id, document.epoch);
   documents.set(id, document);
   persistDocument(document);
   return documentSummaryFromSource(id, source, document.updatedAt);
+}
+
+function updateDocument(id, source) {
+  const document = readDocument(id);
+  if (documentClients(document.id).length) {
+    const error = new Error("This document is open for live editing. Save changes through the editor connection.");
+    error.statusCode = 409;
+    throw error;
+  }
+  const nextSource = String(source || "");
+  if (Buffer.byteLength(nextSource, "utf8") > MAX_BODY_BYTES) {
+    const error = new Error("Documents cannot exceed 12 MB.");
+    error.statusCode = 413;
+    throw error;
+  }
+  document.source = nextSource;
+  document.revision += 1;
+  document.epoch = crypto.randomUUID();
+  documentEpochs.set(document.id, document.epoch);
+  document.history = [];
+  document.historyBytes = 0;
+  document.updatedAt = new Date().toISOString();
+  persistDocument(document);
+  return { id: document.id, epoch: document.epoch, source: document.source, revision: document.revision, updatedAt: document.updatedAt };
 }
 
 function deleteDocument(id) {
@@ -743,6 +947,7 @@ function deleteDocument(id) {
   if (document) {
     clearTimeout(document.saveTimer);
     documents.delete(normalizedId);
+    documentEpochs.delete(normalizedId);
   }
   const filePath = documentFilePath(normalizedId);
   if (!fs.existsSync(filePath)) {
@@ -774,7 +979,20 @@ async function handleRequest(request, response) {
       return;
     }
 
-    const deleteMatch = url.pathname.match(/^\/api\/documents\/([^/]+)$/);
+    const documentMatch = url.pathname.match(/^\/api\/documents\/([^/]+)$/);
+    if (request.method === "GET" && documentMatch) {
+      const document = readDocument(decodeURIComponent(documentMatch[1]));
+      sendJson(response, 200, { document: { id: document.id, epoch: document.epoch, source: document.source, revision: document.revision, updatedAt: document.updatedAt } });
+      return;
+    }
+
+    if (request.method === "PUT" && documentMatch) {
+      const payload = JSON.parse((await readRequestBody(request)).toString("utf8") || "{}");
+      sendJson(response, 200, { document: updateDocument(decodeURIComponent(documentMatch[1]), payload.source) });
+      return;
+    }
+
+    const deleteMatch = documentMatch;
     if (request.method === "DELETE" && deleteMatch) {
       sendJson(response, 200, { document: deleteDocument(decodeURIComponent(deleteMatch[1])) });
       return;
@@ -833,7 +1051,7 @@ function startServer(port = DEFAULT_PORT, host = HOST, publicUrl = "") {
       if (urls.length) console.log(`LAN address: ${urls.join(" or ")}`);
     }
     if (publicUrl) console.log(`Public editor URL: ${publicUrl}`);
-    console.log("Share a document URL such as /?doc=team-notes to collaborate.");
+    console.log("Use the Documents button to create or open local WMD files.");
   });
   return server;
 }
@@ -883,7 +1101,15 @@ module.exports = {
   createStarterDocument,
   DEFAULT_DOCUMENT_SOURCE,
   docxToWmd,
+  findDuplicateOperation,
+  hasCollaborationCapacity,
+  hasRoomCapacity,
+  MAX_COLLABORATORS,
+  mapOffsetThroughOperation,
   normalizeDocumentId,
+  parseSocketFrames,
   parseOptions,
+  startServer,
+  transformAgainstHistory,
   transformOperations,
 };

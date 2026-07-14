@@ -4,6 +4,8 @@
   const SETTINGS_KEY = "wmd-studio-settings-v4";
   const DRAFT_PREFIX = "wmd-studio-draft-v2:";
   const COLORS = ["#3f7f6b", "#b75b4a", "#486f9b", "#a47732", "#765899"];
+  const MAX_COLLABORATORS = 8;
+  const MAX_DOCUMENT_BYTES = 12 * 1024 * 1024;
   const CALLOUT_TYPES = ["note", "tip", "info", "warning", "danger", "rule", "example"];
   const DEFAULT_DOCUMENT_CONFIG = [
     "@config",
@@ -72,7 +74,9 @@
     mode: settings.defaultMode,
     source: "",
     serverSource: "",
+    epoch: "",
     revision: 0,
+    hasSnapshot: false,
     ready: false,
     dirty: false,
     pending: [],
@@ -81,6 +85,7 @@
     socket: null,
     socketGeneration: 0,
     reconnectTimer: null,
+    capacityFull: false,
     compileTimer: null,
     compileController: null,
     compileGeneration: 0,
@@ -88,7 +93,11 @@
     selectionTimer: null,
     canvasSelection: null,
     canvasText: null,
+    canvasFormats: {},
+    canvasComposing: false,
     restoreCanvasSelection: false,
+    canvasVersion: 0,
+    canvasBases: new Map(),
     previewScroll: { left: 0, top: 0 },
     previewFocus: null,
     rawScrollFrame: null,
@@ -116,7 +125,6 @@
     return {
       username: `Guest ${Math.floor(100 + Math.random() * 900)}`,
       color: COLORS[Math.floor(Math.random() * COLORS.length)],
-      syncUrl: "",
       theme: "light",
       accent: "green",
       defaultMode: "document",
@@ -138,7 +146,6 @@
         ...stored,
         username: String(stored.username || fallback.username).slice(0, 36),
         color: /^#[0-9a-f]{6}$/i.test(stored.color || "") ? stored.color : fallback.color,
-        syncUrl: normalizeServerUrl(stored.syncUrl || ""),
         theme: ["light", "dark", "system"].includes(stored.theme) ? stored.theme : fallback.theme,
         accent: ["green", "orange", "blue", "graphite"].includes(stored.accent) ? stored.accent : fallback.accent,
         defaultMode: stored.defaultMode === "wmd" ? "wmd" : "document",
@@ -391,21 +398,8 @@
     }).filter(Boolean);
   }
 
-  function normalizeServerUrl(value) {
-    const text = String(value || "").trim();
-    if (!text) return "";
-    try {
-      const url = new URL(text);
-      if (!/^https?:$/.test(url.protocol)) return "";
-      if (location.protocol === "https:" && url.protocol !== "https:") return "";
-      return url.origin;
-    } catch (_) {
-      return "";
-    }
-  }
-
   function syncBase() {
-    return settings.syncUrl || location.origin;
+    return location.origin;
   }
 
   function apiUrl(pathname) {
@@ -413,16 +407,13 @@
   }
 
   function collaborationUrl() {
-    const base = new URL(syncBase());
-    base.protocol = base.protocol === "https:" ? "wss:" : "ws:";
-    base.pathname = `${base.pathname.replace(/\/$/, "")}/collaboration`;
-    base.search = "";
-    base.hash = "";
-    return base.toString();
+    const url = new URL("/collaboration", syncBase());
+    url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+    return url.toString();
   }
 
   function shareUrl() {
-    const url = new URL(`${syncBase()}/`);
+    const url = new URL("/", syncBase());
     url.searchParams.set("doc", state.documentId);
     return url.toString();
   }
@@ -453,6 +444,9 @@
       localStorage.setItem(draftKey(), JSON.stringify({
         source: state.source,
         dirty: state.dirty || Boolean(state.pending.length || state.inFlight),
+        baseSource: state.serverSource,
+        baseRevision: state.revision,
+        epoch: state.epoch,
         updatedAt: Date.now(),
       }));
       localSaveStatus.textContent = "Local copy saved";
@@ -538,6 +532,21 @@
     return { ops };
   }
 
+  function operationFromReplaceAll(source, query, replacement) {
+    const ops = [];
+    let cursor = 0;
+    let index = source.indexOf(query, cursor);
+    while (index !== -1) {
+      appendPart(ops, index - cursor);
+      appendPart(ops, -query.length);
+      appendPart(ops, replacement);
+      cursor = index + query.length;
+      index = source.indexOf(query, cursor);
+    }
+    appendPart(ops, source.length - cursor);
+    return { ops };
+  }
+
   function consumePart(part, length) {
     if (typeof part === "string") return part.slice(length);
     return part > 0 ? part - length : part + length;
@@ -606,6 +615,18 @@
     fontControl.style.fontFamily = fontControl.value;
     const styleValue = preset ? `preset:${preset.id}` : blockStyleControl.value;
     if ([...blockStyleControl.options].some((option) => option.value === styleValue)) blockStyleControl.value = styleValue;
+  }
+
+  function updateToolbarFormatting(formats = {}) {
+    state.canvasFormats = { ...formats };
+    const keys = ["bold", "italic", "underline", "strikeThrough", "highlight", "code"];
+    keys.forEach((command) => {
+      const button = document.querySelector(`[data-command="${command}"]`);
+      if (!button) return;
+      const active = state.mode === "document" && Boolean(formats[command]);
+      button.classList.toggle("format-active", active);
+      button.setAttribute("aria-pressed", String(active));
+    });
   }
 
   function documentStylePresets() {
@@ -982,7 +1003,12 @@
       findStatus.textContent = `No matches for "${query}".`;
       return;
     }
-    changeSource(state.source.split(query).join(replaceInput.value), { compile: true, keepEditor: true });
+    const replacement = replaceInput.value;
+    changeSource(state.source.split(query).join(replacement), {
+      compile: true,
+      keepEditor: true,
+      operation: operationFromReplaceAll(state.source, query, replacement),
+    });
     state.findMatch = null;
     findStatus.textContent = `Replaced ${count} match${count === 1 ? "" : "es"}.`;
   }
@@ -1095,7 +1121,7 @@
     clearTimeout(state.reconnectTimer);
     const generation = ++state.socketGeneration;
     if (state.socket && state.socket.readyState < WebSocket.CLOSING) state.socket.close();
-    setConnectionState("", settings.syncUrl ? "Connecting remote" : "Connecting");
+    setConnectionState("", "Connecting");
 
     let socket;
     try {
@@ -1108,8 +1134,18 @@
 
     socket.addEventListener("open", () => {
       if (generation !== state.socketGeneration || state.shuttingDown) return;
-      setConnectionState("connected", settings.syncUrl ? "Remote live" : "Live");
-      send({ type: "join", documentId: state.documentId, name: settings.username, color: settings.color, clientId: state.clientId });
+      state.capacityFull = false;
+      setConnectionState("connected", "Live");
+      send({
+        type: "join",
+        documentId: state.documentId,
+        name: settings.username,
+        color: settings.color,
+        clientId: state.clientId,
+        resume: state.hasSnapshot,
+        revision: state.revision,
+        epoch: state.epoch,
+      });
     });
     socket.addEventListener("message", (event) => {
       if (generation !== state.socketGeneration) return;
@@ -1120,6 +1156,10 @@
     });
     socket.addEventListener("close", () => {
       if (generation !== state.socketGeneration || state.shuttingDown) return;
+      state.ready = false;
+      state.users = [];
+      renderPresence();
+      if (state.capacityFull) return;
       setConnectionState("problem", "Reconnecting - local copy safe");
       scheduleReconnect(generation);
     });
@@ -1128,13 +1168,13 @@
   function scheduleReconnect(generation) {
     clearTimeout(state.reconnectTimer);
     state.reconnectTimer = setTimeout(() => {
-      if (!state.shuttingDown && generation === state.socketGeneration) connect();
+      if (!state.shuttingDown && !state.capacityFull && generation === state.socketGeneration) connect();
     }, 1300);
   }
 
   function requestRefresh() {
     if (state.socket && state.socket.readyState === WebSocket.OPEN) {
-      send({ type: "join", documentId: state.documentId, name: settings.username, color: settings.color, clientId: state.clientId });
+      send({ type: "join", documentId: state.documentId, name: settings.username, color: settings.color, clientId: state.clientId, resume: state.hasSnapshot, revision: state.revision, epoch: state.epoch });
     }
   }
 
@@ -1147,17 +1187,38 @@
       receiveOperation(message);
       return;
     }
+    if (message.type === "resume") {
+      if (message.documentId !== state.documentId || message.epoch !== state.epoch) return;
+      try {
+        for (const operation of message.operations || []) receiveOperation(operation);
+        if (state.revision !== message.revision) throw new Error("The live revision did not resume cleanly.");
+        state.ready = true;
+        if (state.inFlight) resendInFlight();
+        else flushOperations();
+      } catch (_) {
+        state.hasSnapshot = false;
+        requestRefresh();
+      }
+      return;
+    }
     if (message.type === "presence") {
-      state.users = message.users || [];
+      state.users = (message.users || []).slice(0, MAX_COLLABORATORS);
       renderPresence();
-      sendCanvasCursors();
-      if (state.mode === "wmd") renderHighlight();
+      if (state.mode === "document") sendCanvasCursors();
+      else renderHighlight();
       return;
     }
     if (message.type === "resync") {
-      state.serverSource = message.document.source;
-      state.revision = message.document.revision;
-      requestRefresh();
+      receiveDocument(message.document);
+      return;
+    }
+    if (message.type === "capacity") {
+      state.capacityFull = true;
+      state.ready = false;
+      setConnectionState("problem", `Full (${message.maxCollaborators || MAX_COLLABORATORS}/${message.maxCollaborators || MAX_COLLABORATORS})`);
+      saveStatus.textContent = "Local copy safe - document is full";
+      toastMessage(`This document already has ${message.maxCollaborators || MAX_COLLABORATORS} editors.`);
+      state.socket?.close();
       return;
     }
     if (message.type === "error") toastMessage(message.message || "The server rejected an edit.");
@@ -1167,9 +1228,14 @@
     const priorLocal = state.source;
     const draft = readDraft();
     const restore = state.importedSource || (state.dirty && priorLocal ? priorLocal : draft && draft.dirty ? draft.source : "");
+    const baseSource = state.hasSnapshot
+      ? state.serverSource
+      : typeof draft?.baseSource === "string" ? draft.baseSource : document.source;
 
     state.serverSource = document.source;
+    state.epoch = document.epoch || "";
     state.revision = document.revision;
+    state.hasSnapshot = true;
     state.pending = [];
     state.inFlight = null;
     state.ready = true;
@@ -1177,11 +1243,24 @@
     resetHistory();
 
     if (restore && restore !== document.source) {
-      state.source = restore;
-      state.dirty = true;
-      const operation = operationFromDiff(document.source, restore);
+      try {
+        const localOperation = operationFromDiff(baseSource, restore);
+        const remoteOperation = operationFromDiff(baseSource, document.source);
+        if (!localOperation) {
+          state.source = document.source;
+        } else if (!remoteOperation) {
+          state.source = restore;
+        } else {
+          const [rebasedLocal] = transformOperations(localOperation, remoteOperation);
+          state.source = applyOperation(document.source, rebasedLocal);
+        }
+      } catch (_) {
+        state.source = restore;
+      }
+      state.dirty = state.source !== document.source;
+      const operation = operationFromDiff(document.source, state.source);
       if (operation) state.pending.push({ id: createId(), operation });
-      saveStatus.textContent = "Restoring local changes...";
+      saveStatus.textContent = state.dirty ? "Restoring local changes..." : "All changes saved";
     } else {
       state.source = document.source;
       state.dirty = false;
@@ -1194,6 +1273,19 @@
   }
 
   function receiveOperation(message) {
+    if (message.documentId && message.documentId !== state.documentId) return;
+    if (message.epoch && message.epoch !== state.epoch) throw new Error("Live edit epoch changed.");
+    if (message.duplicate) {
+      if (message.clientId === state.clientId && state.inFlight && message.clientOperationId === state.inFlight.id) {
+        state.inFlight = null;
+        state.dirty = Boolean(state.pending.length);
+        saveStatus.textContent = state.dirty ? "Saving changes..." : "All changes saved";
+        persistDraft();
+        flushOperations();
+      }
+      return;
+    }
+    if (message.revision !== state.revision + 1) throw new Error("Live edit revision gap.");
     state.serverSource = applyOperation(state.serverSource, message.operation);
     state.revision = message.revision;
 
@@ -1215,31 +1307,39 @@
         incoming = remoteOperation;
         return { ...entry, operation: localOperation };
       });
+      if (state.mode === "document" && state.canvasSelection) state.restoreCanvasSelection = true;
       state.source = applyOperation(state.source, incoming);
       resetHistory();
-      if (state.canvasSelection && state.mode === "document") state.restoreCanvasSelection = true;
       state.dirty = Boolean(state.pending.length || state.inFlight);
       renderSource();
       restoreRawSelection(rawSelection, incoming);
       persistDraft();
       scheduleCompile(140);
-      saveStatus.textContent = "Updated by a collaborator";
-    } catch (_) {
-      requestRefresh();
+      saveStatus.textContent = `Updated live - ${state.users.length}/${MAX_COLLABORATORS}`;
+    } catch (error) {
+      state.hasSnapshot = false;
+      state.ready = false;
+      throw error;
     }
   }
 
   function changeSource(nextSource, options = {}) {
     if (nextSource === state.source) return;
+    if (new TextEncoder().encode(nextSource).byteLength > MAX_DOCUMENT_BYTES) {
+      renderSource();
+      toastMessage("Documents cannot exceed 12 MB.");
+      return;
+    }
     const previousSource = state.source;
-    const operation = operationFromDiff(previousSource, nextSource);
+    const operation = options.operation || operationFromDiff(previousSource, nextSource);
     if (options.history !== false) recordHistory(previousSource, options);
     state.source = nextSource;
     state.dirty = true;
-    if (operation && state.ready) state.pending.push({ id: createId(), operation });
+    if (state.mode === "document" && state.canvasSelection) state.restoreCanvasSelection = true;
+    if (operation) state.pending.push({ id: createId(), operation });
     renderSource({ keepEditor: Boolean(options.keepEditor) });
     scheduleDraftSave();
-    saveStatus.textContent = state.ready ? "Saving changes..." : "Saved locally - waiting for server";
+    saveStatus.textContent = state.ready ? "Saving changes..." : "Saved locally - reconnecting";
     flushOperations();
     if (options.compile !== false) scheduleCompile();
   }
@@ -1271,7 +1371,13 @@
     const nextSource = from.pop();
     to.push(state.source);
     state.history.lastAt = 0;
+    if (state.mode === "document" && state.canvasSelection) state.restoreCanvasSelection = true;
     changeSource(nextSource, { compile: true, keepEditor: state.mode === "wmd", history: false });
+  }
+
+  function scheduleDocumentSave() {
+    persistDraft();
+    flushOperations();
   }
 
   function flushOperations() {
@@ -1280,6 +1386,18 @@
     send({
       type: "operation",
       baseRevision: state.revision,
+      epoch: state.epoch,
+      clientOperationId: state.inFlight.id,
+      operation: state.inFlight.operation,
+    });
+  }
+
+  function resendInFlight() {
+    if (!state.ready || !state.inFlight || !state.socket || state.socket.readyState !== WebSocket.OPEN) return;
+    send({
+      type: "operation",
+      baseRevision: state.revision,
+      epoch: state.epoch,
       clientOperationId: state.inFlight.id,
       operation: state.inFlight.operation,
     });
@@ -1293,8 +1411,8 @@
   }
 
   async function compilePreview(generation) {
-    if (!state.source) {
-      preview.srcdoc = "<!doctype html><body></body>";
+    if (state.mode === "document" && state.canvasComposing) {
+      if (generation === state.compileGeneration) state.compileTimer = setTimeout(() => compilePreview(generation), 180);
       return;
     }
     const controller = new AbortController();
@@ -1310,7 +1428,15 @@
       const result = await response.json();
       if (!response.ok) throw new Error(result.error || "Compilation failed.");
       if (generation !== state.compileGeneration) return;
-      preview.srcdoc = state.mode === "document" ? editableCanvasHtml(themedHtml(result.html)) : themedHtml(result.html);
+      const themed = themedHtml(result.html);
+      if (state.mode === "document") {
+        const canvasVersion = ++state.canvasVersion;
+        state.canvasBases.set(canvasVersion, { source, serialized: null });
+        while (state.canvasBases.size > 12) state.canvasBases.delete(state.canvasBases.keys().next().value);
+        preview.srcdoc = editableCanvasHtml(themed, canvasVersion);
+      } else {
+        preview.srcdoc = themed;
+      }
       renderWarnings(result.warnings || []);
     } catch (error) {
       if (error.name === "AbortError" || generation !== state.compileGeneration) return;
@@ -1327,11 +1453,12 @@
       blue: "#285f8e",
       graphite: "#3e4542",
     }[settings.accent] || "#245a46";
-    const className = [resolvedTheme() === "dark" ? "dark" : "", state.mode === "wmd" ? "wmd-studio-static" : ""].filter(Boolean).join(" ");
-    const staticZoom = state.mode === "wmd" ? `body.wmd-studio-static .layout{zoom:${settings.zoom}%;}` : "";
+    const staticMode = state.mode === "wmd";
+    const className = [resolvedTheme() === "dark" ? "dark" : "", staticMode ? "wmd-studio-static" : ""].filter(Boolean).join(" ");
+    const staticZoom = staticMode ? `body.wmd-studio-static .layout{zoom:${settings.zoom}%;}` : "";
     const style = `<style>:root{--link:${accent};--panel-active:${accent}}${stylePresetCss()}${staticZoom}</style>`;
     const themed = html.replace("</head>", `${style}</head>`).replace("<body>", `<body class="${className}">`);
-    return state.mode === "wmd" ? themed.replace("</body>", `${staticPreviewBridge()}</body>`) : themed;
+    return staticMode ? themed.replace("</body>", `${staticPreviewBridge()}</body>`) : themed;
   }
 
   function staticPreviewBridge() {
@@ -1457,19 +1584,21 @@
 </script>`;
   }
 
-  function editableCanvasHtml(html) {
+  function editableCanvasHtml(html, sourceVersion) {
     const bridge = `
 <style>
   .layout { min-height: 100vh; }
   .wmd-studio-duplicate-title { display: none !important; }
   main.wmd-studio-editable { min-height: calc(100vh - 32px); outline: none; cursor: text; }
   .wmd-studio-heading-toggle { width: 1.45em; margin: 0 0.18em 0 0; padding: 0; border: 0; color: var(--muted); background: transparent; font: inherit; line-height: 1; cursor: pointer; vertical-align: baseline; }
+  .wmd-studio-heading-toggle::before { content: attr(data-marker); }
   .wmd-studio-heading-toggle:hover, .wmd-studio-heading-toggle:focus-visible { color: var(--text); }
   .wmd-studio-cursor { display:inline-block;width:2px;height:1.25em;margin:-0.1em 0;vertical-align:text-bottom;background:var(--wmd-cursor,#b9483c);position:relative;pointer-events:none; }
   .wmd-studio-cursor::after { content:attr(data-name);position:absolute;left:-2px;bottom:100%;padding:2px 5px;border-radius:4px;color:white;background:var(--wmd-cursor,#b9483c);font:700 10px sans-serif;white-space:nowrap; }
 </style>
 <script>
 (function() {
+  var sourceVersion = ${JSON.stringify(sourceVersion)};
   var main = document.querySelector('main');
   var macros = [];
   var presets = [];
@@ -1485,7 +1614,7 @@
   document.querySelectorAll('.tab-title').forEach(function(title) {
     var duplicate = title.nextElementSibling;
     if (duplicate && duplicate.tagName === 'H1' && duplicate.textContent.trim() === title.textContent.trim()) {
-      duplicate.classList.add('wmd-studio-duplicate-title');
+      duplicate.remove();
     }
   });
 
@@ -1566,7 +1695,7 @@
         var collapsed = node.dataset.collapsed === 'true';
         var toggle = node.querySelector('.wmd-studio-heading-toggle');
         if (toggle) {
-          toggle.textContent = collapsed ? '>' : 'v';
+          toggle.dataset.marker = collapsed ? '>' : 'v';
           toggle.setAttribute('aria-label', collapsed ? 'Expand section' : 'Collapse section');
         }
         stack.push({ level: level, collapsed: collapsed || hiddenByParent });
@@ -1592,7 +1721,7 @@
         toggle.type = 'button';
         toggle.className = 'heading-collapse-marker wmd-studio-heading-toggle';
         toggle.contentEditable = 'false';
-        toggle.textContent = 'v';
+        toggle.dataset.marker = 'v';
         toggle.setAttribute('aria-label', 'Collapse section');
         toggle.addEventListener('pointerdown', function(event) { event.preventDefault(); });
         toggle.addEventListener('click', function(event) {
@@ -1613,6 +1742,7 @@
     var message = payload || {};
     message.channel = 'wmd-studio-canvas';
     message.type = type;
+    message.sourceVersion = sourceVersion;
     parent.postMessage(message, '*');
   }
 
@@ -1625,8 +1755,26 @@
 
   function selectionInfo() {
     var selection = window.getSelection();
-    if (!selection || !main.contains(selection.anchorNode)) return { start: 0, end: 0, preset: '' };
-    return { start: offsetFor(selection.anchorNode, selection.anchorOffset), end: offsetFor(selection.focusNode, selection.focusOffset), preset: selectedPresetId() };
+    if (!selection || !main.contains(selection.anchorNode)) return { start: 0, end: 0, preset: '', formats: {} };
+    var anchor = selection.anchorNode && (selection.anchorNode.nodeType === Node.ELEMENT_NODE ? selection.anchorNode : selection.anchorNode.parentElement);
+    var closest = function(selector) { return !!(anchor && anchor.closest && anchor.closest(selector)); };
+    var commandState = function(command) { try { return document.queryCommandState(command); } catch (_) { return false; } };
+    var anchorOffset = offsetFor(selection.anchorNode, selection.anchorOffset);
+    var focusOffset = offsetFor(selection.focusNode, selection.focusOffset);
+    return {
+      start: Math.min(anchorOffset, focusOffset),
+      end: Math.max(anchorOffset, focusOffset),
+      backward: anchorOffset > focusOffset,
+      preset: selectedPresetId(),
+      formats: {
+        bold: commandState('bold') || closest('strong,b'),
+        italic: commandState('italic') || closest('em,i'),
+        underline: commandState('underline') || closest('u'),
+        strikeThrough: commandState('strikeThrough') || closest('s,strike,del'),
+        highlight: closest('mark,.highlight,[class*="highlight-"],[style*="background-color"],[style*="background:"]'),
+        code: closest('code')
+      }
+    };
   }
 
   function findMacro(before) {
@@ -1707,6 +1855,7 @@
       var selection = window.getSelection();
       selection.removeAllRanges();
       selection.addRange(range);
+      if (info.backward && selection.setBaseAndExtent) selection.setBaseAndExtent(end.node, end.offset, start.node, start.offset);
       main.focus();
     } catch (_) {}
   }
@@ -1859,6 +2008,16 @@
 
   function command(data) {
     main.focus();
+    var currentSelection = window.getSelection();
+    var currentAnchor = currentSelection && currentSelection.anchorNode
+      ? (currentSelection.anchorNode.nodeType === Node.ELEMENT_NODE ? currentSelection.anchorNode : currentSelection.anchorNode.parentElement)
+      : null;
+    var unwrap = function(element) {
+      if (!element || !element.parentNode) return false;
+      while (element.firstChild) element.parentNode.insertBefore(element.firstChild, element);
+      element.remove();
+      return true;
+    };
     if (data.command === 'insert') {
       if (data.kind === 'link') {
         var href = data.value && data.value.internalTarget
@@ -1896,7 +2055,15 @@
     } else if (data.command === 'formatBlock') {
       document.execCommand('formatBlock', false, data.value || 'p');
     } else if (data.command === 'highlight') {
-      document.execCommand('hiliteColor', false, data.value || '#fff0a6');
+      var highlighted = currentAnchor && currentAnchor.closest && currentAnchor.closest('mark,.highlight,[class*="highlight-"],[style*="background-color"]');
+      if (!unwrap(highlighted)) document.execCommand('hiliteColor', false, data.value || '#fff0a6');
+    } else if (data.command === 'code') {
+      var existingCode = currentAnchor && currentAnchor.closest && currentAnchor.closest('code');
+      if (!unwrap(existingCode)) {
+        var selectedText = currentSelection && currentSelection.toString() ? currentSelection.toString() : 'code';
+        var escapedText = selectedText.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        document.execCommand('insertHTML', false, '<code>' + escapedText + '</code>');
+      }
     } else if (data.command) {
       document.execCommand(data.command, false, data.value || null);
     }
@@ -1914,7 +2081,10 @@
     });
   }
 
-  main.addEventListener('input', function() { expandMacro(); notifyInput(); });
+  var composing = false;
+  main.addEventListener('compositionstart', function() { composing = true; post('composition', { active: true }); });
+  main.addEventListener('compositionend', function() { composing = false; expandMacro(); notifyInput(); post('composition', { active: false }); });
+  main.addEventListener('input', function() { if (!composing) { expandMacro(); notifyInput(); } });
   setupTaskCheckboxes();
   main.addEventListener('click', function(event) { event.stopPropagation(); post('selection', selectionInfo()); }, true);
   main.addEventListener('dblclick', function(event) {
@@ -1942,7 +2112,7 @@
   main.addEventListener('keydown', function(event) {
     if (event.key === 'Enter' && !event.isComposing) {
       event.preventDefault();
-      document.execCommand('insertLineBreak');
+      document.execCommand(event.shiftKey ? 'insertLineBreak' : 'insertParagraph');
       notifyInput();
       return;
     }
@@ -1956,11 +2126,13 @@
     var key = event.key.toLowerCase();
     if (key === 'z') { event.preventDefault(); post('request-history', { direction: event.shiftKey ? 'redo' : 'undo' }); return; }
     if (key === 'y') { event.preventDefault(); post('request-history', { direction: 'redo' }); return; }
+    if (key === 's' && event.shiftKey) { event.preventDefault(); command({ command: 'strikeThrough' }); return; }
     if (key === 'h') { event.preventDefault(); post('request-find', {}); return; }
-    if (key === 'b') { event.preventDefault(); if (selectedPresetId()) post('request-preset-format', { preset: selectedPresetId(), command: 'bold' }); else command({ command: 'bold' }); }
-    if (key === 'i') { event.preventDefault(); if (selectedPresetId()) post('request-preset-format', { preset: selectedPresetId(), command: 'italic' }); else command({ command: 'italic' }); }
-    if (key === 'u') { event.preventDefault(); if (selectedPresetId()) post('request-preset-format', { preset: selectedPresetId(), command: 'underline' }); else command({ command: 'underline' }); }
+    if (key === 'b') { event.preventDefault(); command({ command: 'bold' }); }
+    if (key === 'i') { event.preventDefault(); command({ command: 'italic' }); }
+    if (key === 'u') { event.preventDefault(); command({ command: 'underline' }); }
     if (key === 'k') { event.preventDefault(); post('request-link', {}); }
+    if (key === 'e') { event.preventDefault(); command({ command: 'code' }); }
   });
   document.addEventListener('selectionchange', function() {
     var selection = window.getSelection();
@@ -1994,18 +2166,18 @@
       (data.users || []).slice().sort(function(a, b) { return (b.selection.end || 0) - (a.selection.end || 0); }).forEach(addCursor);
     }
   });
-  post('ready', { text: main.textContent });
+  post('ready', { text: main.textContent, html: main.innerHTML, selection: selectionInfo() });
 })();
 </script>`;
     return html.replace("</body>", `${bridge}</body>`);
   }
 
-  function canvasHtmlToWmd(html) {
+  function canvasHtmlToWmd(html, baseSource = state.source) {
     const documentFragment = new DOMParser().parseFromString(`<main>${html}</main>`, "text/html");
     const root = documentFragment.querySelector("main");
     const sections = [...root.children].filter((child) => child.matches && child.matches("section.tab-section"));
     if (!sections.length) return state.source;
-    const preambleMatch = state.source.match(/^[\s\S]*?(?=^@tab\b)/m);
+    const preambleMatch = String(baseSource || "").match(/^[\s\S]*?(?=^@tab\b)/m);
     const preamble = preambleMatch ? preambleMatch[0].trim() : "";
     const tabs = sections.map((section) => {
       const name = section.dataset.tabName || "Home";
@@ -2081,7 +2253,7 @@
 
   function serializeCanvasInline(node) {
     const walk = (current) => {
-      if (current.nodeType === Node.TEXT_NODE) return current.data;
+      if (current.nodeType === Node.TEXT_NODE) return current.data.replace(/([\\`*_\[\]{}()#+\-.!~=])/g, "\\$1");
       if (current.nodeType !== Node.ELEMENT_NODE) return "";
       if (current.classList.contains("wmd-studio-cursor") || current.classList.contains("heading-collapse-marker")) return "";
       const children = [...current.childNodes].map(walk).join("");
@@ -2090,6 +2262,11 @@
       if (current.tagName === "U") return `++${children}++`;
       if (current.tagName === "S" || current.tagName === "STRIKE" || current.tagName === "DEL") return `~~${children}~~`;
       if (current.tagName === "MARK") return `=${children}=`;
+      if (current.tagName === "SPAN" && current.classList.contains("highlight")) {
+        const level = [3, 2, 1].find((value) => current.classList.contains(`highlight-${value}`)) || 1;
+        const marker = "=".repeat(level);
+        return `${marker}${children}${marker}`;
+      }
       if (current.tagName === "SPAN" && /background-color/i.test(current.getAttribute("style") || "")) return `=${children}=`;
       if (current.tagName === "CODE") return `\`${children}\``;
       if (current.tagName === "INPUT" && current.type === "checkbox") return current.checked ? "[x] " : "[ ] ";
@@ -2098,7 +2275,7 @@
       if (current.tagName === "BR") return "\n";
       return children;
     };
-    return [...node.childNodes].map(walk).join("").replace(/\u200b/g, "").trim();
+    return [...node.childNodes].map(walk).join("").replace(/\u200b/g, "");
   }
 
   function renderWarnings(warnings) {
@@ -2107,7 +2284,7 @@
   }
 
   function setMode(mode, focus = false) {
-    state.mode = mode === "wmd" ? "wmd" : "document";
+    state.mode = mode === "document" ? "document" : "wmd";
     const documentMode = state.mode === "document";
     documentModeButton.setAttribute("aria-pressed", String(documentMode));
     wmdModeButton.setAttribute("aria-pressed", String(!documentMode));
@@ -2115,13 +2292,10 @@
     editorPane.hidden = documentMode;
     rawEditorVisible(!documentMode);
     applyPaneLayout();
-    if (documentMode) scheduleCompile(0);
-    else {
-      renderSource();
-      // Canvas edits intentionally avoid an iframe refresh while typing. Recompile when leaving it.
-      scheduleCompile(0);
-      if (focus) editor.focus();
-    }
+    renderSource();
+    scheduleCompile(0);
+    if (!documentMode && focus) editor.focus();
+    if (!documentMode) updateToolbarFormatting({});
   }
 
   function rawEditorVisible(visible) {
@@ -2396,7 +2570,7 @@
     state.pendingInsert = {
       kind,
       presetId: preset?.id || "",
-      rawSelection: state.mode === "wmd" ? captureRawSelection() : null,
+      rawSelection: captureRawSelection(),
       canvasSelection: state.mode === "document" && state.canvasSelection ? { ...state.canvasSelection } : null,
     };
     insertFields.replaceChildren();
@@ -2594,7 +2768,10 @@
       editor.scrollTop = pending.rawSelection.scrollTop;
       editor.scrollLeft = pending.rawSelection.scrollLeft;
     }
-    if (state.mode === "document" && pending?.canvasSelection) state.canvasSelection = pending.canvasSelection;
+    if (state.mode === "document" && pending?.canvasSelection) {
+      state.canvasSelection = pending.canvasSelection;
+      state.restoreCanvasSelection = true;
+    }
     state.pendingInsert = null;
     if (kind === "preset") {
       saveStylePreset(value, pending?.presetId);
@@ -2781,10 +2958,13 @@
       const key = event.key.toLowerCase();
       if (key === "z") { event.preventDefault(); applyHistory(event.shiftKey ? "redo" : "undo"); return; }
       if (key === "y") { event.preventDefault(); applyHistory("redo"); return; }
+      if (key === "s" && event.shiftKey) { event.preventDefault(); wrapRaw("~~"); return; }
+      if (key === "s") { event.preventDefault(); persistDraft(); scheduleDocumentSave(); toastMessage("Saving document..."); return; }
       if (key === "b") { event.preventDefault(); syncRawPreset(); if (!updateActivePresetFormatting("bold")) wrapRaw("*"); return; }
       if (key === "i") { event.preventDefault(); syncRawPreset(); if (!updateActivePresetFormatting("italic")) wrapRaw("_"); return; }
       if (key === "u") { event.preventDefault(); syncRawPreset(); if (!updateActivePresetFormatting("underline")) wrapRaw("++"); return; }
       if (key === "k") { event.preventDefault(); requestInsert("link"); return; }
+      if (key === "e") { event.preventDefault(); wrapRaw("`"); return; }
     }
     if (!['*', '_', '=', '`'].includes(event.key) || event.ctrlKey || event.metaKey || event.altKey) return;
     const start = editor.selectionStart;
@@ -2804,9 +2984,7 @@
     state.selectionTimer = setTimeout(() => {
       if (state.mode === "wmd" && document.activeElement === editor) {
         syncRawPreset();
-      }
-      if (state.ready && state.mode === "wmd" && document.activeElement === editor) {
-        send({ type: "selection", mode: "wmd", start: editor.selectionStart, end: editor.selectionEnd });
+        if (state.ready) send({ type: "selection", mode: "wmd", start: editor.selectionStart, end: editor.selectionEnd });
       }
     }, 90);
   }
@@ -2889,6 +3067,13 @@
     if (event.source !== preview.contentWindow) return;
     const message = event.data || {};
     if (message.channel !== "wmd-studio-canvas") return;
+    const canvasEntry = state.canvasBases.get(Number(message.sourceVersion));
+    if (!canvasEntry) return;
+    if (message.type === "composition") {
+      state.canvasComposing = Boolean(message.active);
+      if (!state.canvasComposing) scheduleCompile(180);
+      return;
+    }
     if (message.type === "ready") {
       const nextText = String(message.text || "");
       if (state.restoreCanvasSelection && state.canvasSelection && typeof state.canvasText === "string") {
@@ -2899,7 +3084,12 @@
         };
       }
       state.canvasText = nextText;
+      canvasEntry.serialized = canvasHtmlToWmd(String(message.html || ""), canvasEntry.source);
+      if (message.selection?.formats) updateToolbarFormatting(message.selection.formats);
       sendCanvasState();
+      if (state.ready && state.canvasSelection) {
+        send({ type: "selection", mode: "canvas", start: state.canvasSelection.start, end: state.canvasSelection.end });
+      }
       return;
     }
     if (message.type === "input") {
@@ -2908,18 +3098,40 @@
         state.canvasSelection = {
           start: Number(message.selection.start) || 0,
           end: Number(message.selection.end) || 0,
+          backward: Boolean(message.selection.backward),
         };
         setActivePreset(message.selection.preset);
+        updateToolbarFormatting(message.selection.formats || {});
       }
-      changeSource(canvasHtmlToWmd(String(message.html || "")), { compile: false });
+      const nextSerialized = canvasHtmlToWmd(String(message.html || ""), canvasEntry.source);
+      if (typeof canvasEntry.serialized !== "string") canvasEntry.serialized = nextSerialized;
+      const rebased = globalThis.WmdEditorCore.rebaseCanvasEdit({
+        serializedBase: canvasEntry.serialized,
+        nextSerialized,
+        sourceBase: canvasEntry.source,
+        currentSource: state.source,
+      });
+      if (new TextEncoder().encode(rebased.source).byteLength > MAX_DOCUMENT_BYTES) {
+        toastMessage("Documents cannot exceed 12 MB.");
+        state.restoreCanvasSelection = true;
+        scheduleCompile(0);
+        return;
+      }
+      canvasEntry.serialized = nextSerialized;
+      canvasEntry.source = rebased.source;
+      state.restoreCanvasSelection = true;
+      if (rebased.operation) changeSource(rebased.source, { compile: false, operation: rebased.operation });
+      scheduleCompile(650);
       return;
     }
     if (message.type === "selection") {
       state.canvasSelection = {
         start: Number(message.start) || 0,
         end: Number(message.end) || 0,
+        backward: Boolean(message.backward),
       };
       setActivePreset(message.preset);
+      updateToolbarFormatting(message.formats || {});
       send({ type: "selection", mode: "canvas", start: state.canvasSelection.start, end: state.canvasSelection.end });
       return;
     }
@@ -2975,24 +3187,13 @@
       if (!self && user.selection) avatar.addEventListener("click", () => jumpToUser(user));
       presence.append(avatar);
     });
+    presence.setAttribute("aria-label", `${state.users.length} of ${MAX_COLLABORATORS} editors connected`);
   }
 
   function jumpToUser(user) {
     const selection = user.selection;
     if (!selection) return;
-    if (selection.mode === "wmd") {
-      setMode("wmd", true);
-      requestAnimationFrame(() => {
-        const start = clamp(selection.start, 0, state.source.length);
-        const end = clamp(selection.end, 0, state.source.length);
-        editor.setSelectionRange(start, end);
-        const line = state.source.slice(0, start).split("\n").length - 1;
-        const lineHeight = Number.parseFloat(getComputedStyle(editor).lineHeight) || 23;
-        editor.scrollTop = Math.max(0, line * lineHeight - editor.clientHeight / 2);
-        editor.focus();
-        scheduleRawSelection();
-      });
-    } else {
+    if (selection.mode === "canvas") {
       state.canvasSelection = {
         start: Math.max(0, Number(selection.start) || 0),
         end: Math.max(0, Number(selection.end) || 0),
@@ -3000,7 +3201,20 @@
       state.restoreCanvasSelection = true;
       if (state.mode === "document") sendCanvasState({ forceSelection: true });
       else setMode("document");
+      toastMessage(`Jumped to ${user.name}.`);
+      return;
     }
+    setMode("wmd", true);
+    requestAnimationFrame(() => {
+      const start = clamp(selection.start, 0, state.source.length);
+      const end = clamp(selection.end, 0, state.source.length);
+      editor.setSelectionRange(start, end);
+      const line = state.source.slice(0, start).split("\n").length - 1;
+      const lineHeight = Number.parseFloat(getComputedStyle(editor).lineHeight) || 23;
+      editor.scrollTop = Math.max(0, line * lineHeight - editor.clientHeight / 2);
+      editor.focus();
+      scheduleRawSelection();
+    });
     toastMessage(`Jumped to ${user.name}.`);
   }
 
@@ -3159,29 +3373,33 @@
     state.documentId = id;
     state.ready = false;
     state.revision = 0;
+    state.hasSnapshot = false;
     state.serverSource = "";
+    state.epoch = "";
     state.pending = [];
     state.inFlight = null;
+    state.users = [];
+    state.capacityFull = false;
     state.dirty = false;
     state.canvasSelection = null;
     state.canvasText = null;
+    state.canvasFormats = {};
+    state.canvasComposing = false;
     state.restoreCanvasSelection = false;
+    state.canvasBases.clear();
     state.previewScroll = { left: 0, top: 0 };
     state.previewFocus = null;
     resetHistory();
     const draft = readDraft(id);
     state.source = draft ? draft.source : "";
     renderSource();
+    renderPresence();
     if (options.pushHistory !== false) {
       history.pushState({}, "", documentUrl(id));
     }
-    saveStatus.textContent = state.source ? "Local draft loaded - connecting..." : "Loading document...";
+    saveStatus.textContent = state.source ? "Local draft loaded - loading document..." : "Loading document...";
     scheduleCompile(0);
-    if (state.socket && state.socket.readyState === WebSocket.OPEN) {
-      send({ type: "join", documentId: id, name: settings.username, color: settings.color, clientId: state.clientId });
-    } else {
-      connect();
-    }
+    connect();
   }
 
   async function importDocument(file) {
@@ -3223,7 +3441,6 @@
 
   function openSettings() {
     document.querySelector("#usernameInput").value = settings.username;
-    document.querySelector("#syncUrlInput").value = settings.syncUrl;
     document.querySelector("#cursorColorInput").value = settings.color;
     document.querySelector("#themeInput").value = settings.theme;
     document.querySelector("#accentInput").value = settings.accent;
@@ -3242,21 +3459,13 @@
   }
 
   function saveSettingsFromForm() {
-    const requestedSyncUrl = document.querySelector("#syncUrlInput").value.trim();
-    const syncUrl = normalizeServerUrl(requestedSyncUrl);
-    if (requestedSyncUrl && !syncUrl) {
-      toastMessage("Enter a full sync server URL. HTTPS pages require an HTTPS server.");
-      return false;
-    }
-    const serverChanged = syncUrl !== settings.syncUrl;
     settings = {
       ...settings,
       username: document.querySelector("#usernameInput").value.trim().slice(0, 36) || settings.username,
-      syncUrl,
       color: document.querySelector("#cursorColorInput").value,
       theme: document.querySelector("#themeInput").value,
       accent: document.querySelector("#accentInput").value,
-      defaultMode: document.querySelector("#defaultModeInput").value,
+      defaultMode: document.querySelector("#defaultModeInput").value === "wmd" ? "wmd" : "document",
       macros: normalizeMacros([...macroList.querySelectorAll(".macro-row")].map((row) => ({
         trigger: row.querySelector(".macro-trigger").value,
         replacement: row.querySelector(".macro-replacement").value,
@@ -3265,19 +3474,8 @@
     saveSettings();
     applyAppearance();
     send({ type: "profile", name: settings.username, color: settings.color });
-    if (serverChanged) {
-      // Prefer the document currently on screen when moving it to another sync server.
-      state.dirty = Boolean(state.source);
-      persistDraft();
-      state.ready = false;
-      state.pending = [];
-      state.inFlight = null;
-      connect();
-      toastMessage("Switching to the selected sync server. Your local draft is safe.");
-    } else {
-      sendCanvasState();
-      toastMessage("Settings saved.");
-    }
+    scheduleCompile(0);
+    toastMessage("Settings saved.");
     return true;
   }
 
@@ -3339,16 +3537,17 @@
       const command = button.dataset.command;
       if (command === "undo" || command === "redo") {
         applyHistory(command);
-      } else if (updateActivePresetFormatting(command)) {
-        return;
       } else if (state.mode === "document") {
         if (command === "highlight") sendCanvasCommand("highlight");
         else sendCanvasCommand(command);
+      } else if (updateActivePresetFormatting(command)) {
+        return;
       } else if (command === "bold") wrapRaw("*");
       else if (command === "italic") wrapRaw("_");
       else if (command === "underline") wrapRaw("++");
       else if (command === "strikeThrough") wrapRaw("~~");
       else if (command === "highlight") wrapRaw("=");
+      else if (command === "code") wrapRaw("`");
     }));
     document.querySelectorAll("[data-insert]").forEach((button) => button.addEventListener("click", () => requestInsert(button.dataset.insert)));
     document.querySelectorAll("[data-document-command]").forEach((button) => button.addEventListener("click", () => {
@@ -3389,14 +3588,7 @@
     documentsCreateForm.addEventListener("submit", createDocumentFromLibrary);
     document.querySelector("#renameButton").addEventListener("click", openRenameDialog);
     document.querySelector("#downloadButton").addEventListener("click", downloadDocument);
-    document.querySelector("#shareButton").addEventListener("click", async () => {
-      try {
-        await navigator.clipboard.writeText(shareUrl());
-        toastMessage(settings.syncUrl || location.hostname !== "127.0.0.1" ? "Share link copied." : "Link copied. For remote collaborators, use a public sync server in Settings.");
-      } catch (_) {
-        openShareDialog();
-      }
-    });
+    document.querySelector("#shareButton").addEventListener("click", openShareDialog);
     document.querySelector("#selectShareLinkButton").addEventListener("click", () => {
       shareLinkInput.focus();
       shareLinkInput.select();
@@ -3404,7 +3596,7 @@
     document.querySelector("#copyShareLinkButton").addEventListener("click", async () => {
       try {
         await navigator.clipboard.writeText(shareLinkInput.value);
-        toastMessage("Share link copied.");
+        toastMessage("Invitation link copied.");
         shareDialog.close("copied");
       } catch (_) {
         shareLinkInput.focus();
@@ -3522,7 +3714,7 @@
       localSaveStatus.textContent = "Local draft loaded";
       scheduleCompile(0);
     }
-    setMode(state.mode);
+    setMode(settings.defaultMode);
     connect();
     if (new URLSearchParams(location.search).get("documents") === "1") showDocumentsPage({ pushHistory: false });
   }
