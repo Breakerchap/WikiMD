@@ -9,6 +9,10 @@ node_modules/
 # Local documents created by the web editor
 web/data/
 
+# Rebuilt by npm run web:build before the web server starts.
+web/public/wmd-collab.bundle.js
+web/public/wmd-collab.bundle.js.map
+
 # Local editor/system noise
 .DS_Store
 Thumbs.db

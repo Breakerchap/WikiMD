@@ -34,10 +34,10 @@ The `web-editor` branch adds a local, collaborative browser editor without chang
 
 ```bash
 git switch web-editor
-node web/server.js
+npm run web
 ```
 
-Then open `http://127.0.0.1:4313`. It opens in an editable version of the actual compiled document, with a toggle to syntax-highlighted raw WMD. The Docs-style toolbar provides document style, font, size, zoom, formatting, links, images, headings, lists, callouts, tabs, and undo/redo. The workspace also has resizable/hideable panes, MD/WMD/DOCX import, and `.wmd` downloads.
+Then open `http://127.0.0.1:4313`. `npm run web` rebuilds the local browser bundle, then starts the Yjs collaboration server. The existing two-pane GUI now uses Milkdown/ProseMirror for document editing and CodeMirror 6 for WMD, with `.yjs` as authoritative state and a debounced `.wmd` compatibility snapshot. The Docs-style toolbar provides document style, font, size, zoom, formatting, links, images, headings, lists, callouts, tabs, and undo/redo. The workspace also has resizable/hideable panes, MD/WMD/DOCX import, and `.wmd` downloads.
 
 Settings are stored per browser and include your username, cursor color, global theme, main color palette, default editor mode, and text macros such as `--` becoming an en dash. Document styles now live in the WMD `@config` block, so collaborators get the same shortcuts and formatting. Select a Title, Heading, Normal Text, or custom-styled block to change its shared font, size, block type, callout type, checklist/list behaviour, highlight, and formatting from the toolbar; every block using that style updates together. The `Style` toolbar button creates or edits config-backed styles and can record a keybind by clicking **Record** and pressing the shortcut. Use `++underlined text++` for persistent WMD underline.
 

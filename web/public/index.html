@@ -131,10 +131,9 @@
       <section class="workspace" id="workspace">
         <section class="editor-zone pane" id="editorPane">
           <div class="editor-surface">
-            <div class="raw-editor-shell" id="rawEditorShell" hidden>
-              <pre class="wmd-highlight" id="wmdHighlight" aria-hidden="true"><code></code></pre>
-              <textarea id="editor" class="source-editor" wrap="soft" spellcheck="true" autocapitalize="off" autocomplete="off" aria-label="WMD source editor" placeholder="Write WMD here..."></textarea>
-              <div class="editor-hint">Source mode has WMD highlighting, smart pairs, macros, and live compiler warnings.</div>
+            <div class="raw-editor-shell" id="rawEditorShell">
+              <div id="sourceEditor" class="codemirror-editor" aria-label="WMD source editor"></div>
+              <div class="editor-hint">WMD source uses CodeMirror, tolerant parsing, and collaborative cursor decorations.</div>
             </div>
           </div>
         </section>
@@ -142,7 +141,7 @@
         <div class="pane-resizer" data-resize="split" role="separator" aria-label="Resize WMD source and document panels" tabindex="0"></div>
 
         <section class="preview-zone pane" id="previewZone">
-          <iframe id="preview" title="Compiled WMD preview" sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox"></iframe>
+          <div id="richEditor" class="rich-editor milkdown-editor" aria-label="WikiMD document editor"></div>
         </section>
       </section>
     </main>
@@ -295,8 +294,7 @@
     </dialog>
 
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
-    <script src="/editor-sync.js"></script>
-    <script src="/cursor-sync.js"></script>
+    <script src="/wmd-collab.bundle.js"></script>
     <script src="/app.js"></script>
   </body>
 </html>

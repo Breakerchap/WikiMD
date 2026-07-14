@@ -412,6 +412,14 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .rich-editor-shell > .editor-hint { position: sticky; right: 17px; bottom: 13px; margin: -30px 17px 13px auto; max-width: 330px; }
 
 .raw-editor-shell { overflow: hidden; background: var(--paper); }
+.codemirror-editor, .codemirror-editor .cm-editor { width: 100%; height: 100%; }
+.codemirror-editor .cm-scroller { overflow: auto; padding: 22px 24px 48px; font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace; font-size: 0.88rem; line-height: 1.68; }
+.codemirror-editor .cm-content { min-height: 100%; caret-color: var(--ink); }
+.codemirror-editor .cm-gutters { color: var(--muted); background: var(--code-bg); border-right: 1px solid var(--line); }
+.codemirror-editor .cm-activeLine { background: color-mix(in srgb, var(--mint) 32%, transparent); }
+.cm-remote-cursor { display: inline-block; position: relative; width: 2px; height: 1.38em; margin: -0.12em 0; vertical-align: text-bottom; pointer-events: none; background: var(--cursor-color, var(--danger)); }
+.cm-remote-cursor::after { content: attr(data-name); position: absolute; bottom: 100%; left: -2px; padding: 2px 5px; border-radius: 4px; color: white; background: var(--cursor-color, var(--danger)); font: 700 0.62rem/1.2 Aptos, sans-serif; white-space: nowrap; }
+.cm-remote-selection { background: color-mix(in srgb, var(--cursor-color, var(--danger)) 24%, transparent); }
 .wmd-highlight, .source-editor, .raw-scroll-measure {
   position: absolute;
   inset: 0;
@@ -482,7 +490,9 @@ body[data-theme="dark"] ::-webkit-scrollbar-thumb:hover { background: var(--mute
 .remote-source-cursor::after { content: attr(data-name); position: absolute; left: -2px; bottom: 1.1em; transform: translateY(-2px); max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 2px 5px; border-radius: 4px; color: white; background: var(--cursor-color, var(--danger)); font-family: "Aptos", sans-serif; font-size: 0.62rem; line-height: 1.2; }
 
 .preview-zone { min-height: 0; display: flex; padding: 0; color: var(--ink); background: var(--soft-canvas); overflow: hidden; }
-#preview { flex: 1; width: 100%; min-height: 0; border: 0; border-radius: 0; background: white; box-shadow: none; }
+.milkdown-editor { flex: 1; min-height: 0; overflow: auto; background: white; }
+.milkdown-editor .ProseMirror { min-height: 100%; outline: none; }
+.remote-rich-selection { background: color-mix(in srgb, var(--cursor-color, var(--danger)) 24%, transparent); }
 
 .settings-dialog { width: min(620px, calc(100vw - 28px)); max-height: min(760px, calc(100vh - 32px)); padding: 0; color: var(--ink); background: var(--paper); border: 1px solid var(--line); border-radius: 14px; box-shadow: var(--shadow); }
 .settings-dialog::backdrop { background: rgba(8, 13, 10, 0.48); backdrop-filter: blur(3px); }
