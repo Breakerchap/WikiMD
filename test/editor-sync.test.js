@@ -1,126 +1,86 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
-const { compile } = require("../wmd-compiler");
-const {
-  applyOperation,
-  operationFromTextDiff,
-  operationForSerializedRange,
-  transformOperations,
-  transformSnapshotStack,
-} = require("../web/public/editor-sync");
+const { EditorState } = require("prosemirror-state");
+const { parseWmd, reconcileAst, stringifyWmd } = require("../wmd-ast");
+const { applyAstToProseMirror, getWmdSchema, proseMirrorToWmdAst, wmdAstToProseMirror } = require("../wmd-prosemirror");
 
-function rangeOf(source, value) {
-  const start = source.indexOf(value);
-  assert.notEqual(start, -1);
-  return { start, end: start + value.length };
-}
+const COMPLETE_WMD = `@config
+Normal Text: {wmd-formatting: ; size: 16px};
+Boss Box: {wmd-formatting: !boss; callout-title: Boss};
+@endconfig
 
-test("document typing creates a range-local WMD patch and preserves wiki-link syntax", () => {
-  const source = "@tab Home\n\nSee [[Other|the link]] here.\n\nUntouched tail.";
-  const range = rangeOf(source, "See [[Other|the link]] here.");
-  const operation = operationForSerializedRange(
-    source,
-    range,
-    "See [the link](#other) here.",
-    "See [the links](#other) here.",
-  );
+@var name = Ada
+@tab Home
+@title Welcome
 
-  assert.equal(applyOperation(source, operation), "@tab Home\n\nSee [[Other|the links]] here.\n\nUntouched tail.");
-  assert.equal(operation.ops[0], range.start + "See [[Other|the link".length);
-  assert.ok(operation.ops.at(-1) > 0, "the operation must retain the untouched document suffix");
+# Heading
+
+Paragraph with *bold*, _italic_, ++underline++, ==highlight==, [[Other|a wiki link]], and [a link](https://example.com).
+
+- [ ] Pending
+- [x] Done
+
+| Name | Score |
+| --- | --- |
+| Ada | 10 |
+
+!boss Important
+This callout is preserved.
+!end
+
+@collapse More
+Collapsed content
+@endcollapse
+
+@tab Hidden [hidden]
+@style Normal Text
+Temporary custom styled content
+@end
+`;
+
+test("WikiMD parses and stringifies all custom constructs without changing their source", () => {
+  const ast = parseWmd(COMPLETE_WMD);
+  const types = ast.tabs.flatMap((tab) => tab.blocks.map((block) => block.type));
+
+  assert.deepEqual(types, ["title", "heading", "paragraph", "checklist", "table", "callout", "collapse", "raw"]);
+  assert.equal(ast.tabs[1].attrs.hidden, true);
+  assert.equal(stringifyWmd(ast), COMPLETE_WMD);
 });
 
-test("document formatting inserts WMD delimiters only around the selected text", () => {
-  const source = "@tab Home\n\nKeep alpha beta and tail.";
-  const range = rangeOf(source, "Keep alpha beta and tail.");
-  const operation = operationForSerializedRange(source, range, "Keep alpha beta and tail.", "Keep alpha *beta* and tail.");
+test("WikiMD AST to ProseMirror to AST round-trips stable ids and custom blocks", () => {
+  const ast = parseWmd(COMPLETE_WMD);
+  const schema = getWmdSchema();
+  const document = wmdAstToProseMirror(ast, schema);
+  const restored = proseMirrorToWmdAst(document, { preamble: ast.preamble, config: ast.config });
 
-  assert.equal(applyOperation(source, operation), "@tab Home\n\nKeep alpha *beta* and tail.");
-  assert.ok(operation.ops[0] > 0);
-  assert.ok(operation.ops.at(-1) > 0);
+  assert.equal(stringifyWmd(restored), COMPLETE_WMD);
+  assert.equal(restored.tabs[0].id, ast.tabs[0].id);
+  assert.equal(restored.tabs[0].blocks[5].type, "callout");
+  assert.equal(restored.tabs[0].blocks[6].type, "collapse");
 });
 
-test("block insertion and deletion stay inside the mapped block range", () => {
-  const source = "@tab Home\n\nFirst\n\nSecond\n\nThird";
-  const first = rangeOf(source, "First");
-  const inserted = operationForSerializedRange(source, first, "First", "First\n\nInserted");
-  assert.equal(applyOperation(source, inserted), "@tab Home\n\nFirst\n\nInserted\n\nSecond\n\nThird");
+test("unfinished directives become recovery nodes rather than rejecting the source", () => {
+  const source = "@tab Home\n\n!warning unfinished\nText while typing\n";
+  const ast = parseWmd(source);
+  const block = ast.tabs[0].blocks[0];
 
-  const pair = rangeOf(source, "First\n\nSecond");
-  const deleted = operationForSerializedRange(source, pair, "First\n\nSecond", "Second");
-  assert.equal(applyOperation(source, deleted), "@tab Home\n\nSecond\n\nThird");
-  assert.ok(deleted.ops.at(-1) > 0);
+  assert.equal(block.type, "raw");
+  assert.match(block.diagnostics[0], /Unclosed callout/);
+  assert.equal(stringifyWmd(ast), source);
 });
 
-test("simultaneous document and WMD edits converge through OT", () => {
-  const original = "@tab Home\n\nParagraph here.\n\nTail";
-  const paragraph = rangeOf(original, "Paragraph here.");
-  const documentEdit = operationForSerializedRange(original, paragraph, "Paragraph here.", "Paragraph here!");
-  const remoteEdit = operationFromTextDiff(original, original.replace("Tail", "Remote Tail"));
-  const [documentPrime, remotePrime] = transformOperations(documentEdit, remoteEdit);
+test("small source edits become a targeted ProseMirror transaction, not a document replacement", () => {
+  const schema = getWmdSchema();
+  const before = parseWmd("@tab Home\n\nFirst\n\nEditable\n\nTail\n");
+  const document = wmdAstToProseMirror(before, schema);
+  const view = {
+    state: EditorState.create({ schema, doc: document }),
+    dispatch (transaction) { this.state = this.state.apply(transaction); },
+  };
+  const next = reconcileAst(before, parseWmd("@tab Home\n\nFirst\n\nEditable!\n\nTail\n"));
+  const result = applyAstToProseMirror(view, next, schema);
 
-  assert.equal(
-    applyOperation(applyOperation(original, remoteEdit), documentPrime),
-    applyOperation(applyOperation(original, documentEdit), remotePrime),
-  );
-  assert.equal(applyOperation(applyOperation(original, remoteEdit), documentPrime), "@tab Home\n\nParagraph here!\n\nRemote Tail");
-});
-
-test("stale document ranges relocate after a simultaneous WMD insertion", () => {
-  const original = "@tab Home\n\nFirst block.\n\nEditable block.\n\nTail.";
-  const staleRange = rangeOf(original, "Editable block.");
-  const current = original.replace("First block.", "Raw insertion before the block.\n\nFirst block.");
-  const operation = operationForSerializedRange(current, staleRange, "Editable block.", "Editable block!");
-
-  assert.equal(
-    applyOperation(current, operation),
-    current.replace("Editable block.", "Editable block!"),
-  );
-});
-
-test("temporarily invalid WMD outside an edited source range is preserved byte-for-byte", () => {
-  const invalidPrefix = "@config\nbroken: {{{\n\n";
-  const source = `${invalidPrefix}@tab Home\n\nEditable text\n\n!unclosed`;
-  const range = rangeOf(source, "Editable text");
-  const operation = operationForSerializedRange(source, range, "Editable text", "Editable text!");
-  const result = applyOperation(source, operation);
-
-  assert.ok(result.startsWith(invalidPrefix));
-  assert.ok(result.endsWith("\n\n!unclosed"));
-  assert.equal(result, `${invalidPrefix}@tab Home\n\nEditable text!\n\n!unclosed`);
-});
-
-test("undo and redo snapshots retain concurrent remote edits", () => {
-  const edited = "alpha beta!";
-  const remote = operationFromTextDiff(edited, "Remote alpha beta!");
-  const undo = transformSnapshotStack(["alpha beta"], edited, remote);
-  assert.deepEqual(undo, ["Remote alpha beta"]);
-
-  const original = "alpha beta";
-  const remoteBeforeRedo = operationFromTextDiff(original, "Remote alpha beta");
-  const redo = transformSnapshotStack([edited], original, remoteBeforeRedo);
-  assert.deepEqual(redo, ["Remote alpha beta!"]);
-});
-
-test("ordinary canvas edits never serialize or replace the full document", () => {
-  const source = `@config\ninvalid while typing: [\n@endconfig\n\n@tab Home\n\n${"before ".repeat(80)}target${" after".repeat(80)}\n\nFinal block`;
-  const range = rangeOf(source, `${"before ".repeat(80)}target${" after".repeat(80)}`);
-  const before = source.slice(range.start, range.end);
-  const operation = operationForSerializedRange(source, range, before, before.replace("target", "target!"));
-
-  assert.ok(operation.ops[0] > source.length / 4);
-  assert.ok(operation.ops.at(-1) > 0);
-  assert.equal(operation.ops.filter((part) => typeof part === "number" && part < 0).reduce((sum, part) => sum - part, 0), 0);
-});
-
-test("compiler emits source mapping markers for editable blocks", () => {
-  const source = "@tab Home\n@title Title\n\n# Heading\n\nParagraph\n\n- one\n- two";
-  const result = compile(source);
-  const heading = rangeOf(source, "# Heading");
-  const paragraph = rangeOf(source, "Paragraph");
-  const list = rangeOf(source, "- one\n- two");
-
-  assert.ok(result.html.includes(`<!--wmd-source:${heading.start}:${heading.end}:`));
-  assert.ok(result.html.includes(`<!--wmd-source:${paragraph.start}:${paragraph.end}:`));
-  assert.ok(result.html.includes(`<!--wmd-source:${list.start}:${list.end}:`));
+  assert.deepEqual(result, { kind: "targeted" });
+  assert.equal(view.state.doc.textContent.includes("Editable!"), true);
+  assert.equal(view.state.doc.textContent.includes("Tail"), true);
 });
