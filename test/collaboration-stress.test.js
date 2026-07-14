@@ -139,6 +139,17 @@ test("cursor affinities keep authors after their own insertion and other WMD cur
   assert.deepEqual(serverMapSelection({ start: 3, end: 5 }, operation), { start: 3, end: 7 });
 });
 
+test("an optimistic author cursor waits for its own acknowledgement before being published", () => {
+  const source = "abcde";
+  const operation = operationFromTextDiff(source, "abcXYde");
+  const localCursor = { start: 5, end: 5 };
+  const preAcknowledgement = mapSelectionBackwardThroughOperations(localCursor, [operation]);
+
+  assert.deepEqual(preAcknowledgement, { start: 3, end: 3 });
+  assert.deepEqual(mapSelectionThroughOperations(preAcknowledgement, [operation], "after"), localCursor);
+  assert.deepEqual(mapSelectionThroughOperations(preAcknowledgement, [operation], "before"), { start: 3, end: 3 });
+});
+
 test("a stale raw selection is advanced from its declared server revision", () => {
   const history = [
     { revision: 4, operation: { ops: [2, "++", 3] } },
@@ -190,6 +201,13 @@ test("cursor coordinate stress preserves every surviving server cursor through l
       assert.deepEqual(serverCursor, { start: cursor, end: cursor }, `seed ${seed}, cursor ${cursor}`);
     }
   }
+});
+
+test("document collaborator cursors use overlays instead of mutating contenteditable text", () => {
+  const cursorLayer = fs.readFileSync(path.join(__dirname, "..", "web", "public", "cursor-sync.js"), "utf8");
+  assert.match(cursorLayer, /wmd-studio-cursor-overlay/);
+  assert.match(cursorLayer, /wmd-presence-layer/);
+  assert.doesNotMatch(cursorLayer, /range\.insertNode/);
 });
 
 test("raw WMD highlight and textarea use the same border-box text geometry", () => {
