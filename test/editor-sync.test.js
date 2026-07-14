@@ -1,4 +1,6 @@
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
 const test = require("node:test");
 const { compile } = require("../wmd-compiler");
 const {
@@ -111,4 +113,13 @@ test("compiler emits source mapping markers for editable blocks", () => {
   assert.ok(result.html.includes(`<!--wmd-source:${heading.start}:${heading.end}:`));
   assert.ok(result.html.includes(`<!--wmd-source:${paragraph.start}:${paragraph.end}:`));
   assert.ok(result.html.includes(`<!--wmd-source:${list.start}:${list.end}:`));
+});
+
+test("both editor previews apply incremental source patches without replacing the iframe", () => {
+  const app = fs.readFileSync(path.join(__dirname, "../web/public/app.js"), "utf8");
+
+  assert.match(app, /postCanvas\(\{[\s\S]*type: "source-update",[\s\S]*partial: true/);
+  assert.match(app, /postPreview\(\{[\s\S]*type: "source-update",[\s\S]*partial: true/);
+  assert.match(app, /if \(data\.type === 'source-update'\)/);
+  assert.match(app, /function patchSection\(section, nextSection, bounds, mappingsCurrent\)/);
 });

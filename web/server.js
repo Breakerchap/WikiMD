@@ -7,7 +7,7 @@ const http = require("http");
 const os = require("os");
 const path = require("path");
 const zlib = require("zlib");
-const { compile } = require("../wmd-compiler");
+const { compile, compileIncremental } = require("../wmd-compiler");
 
 const HOST = "127.0.0.1";
 const DEFAULT_PORT = 4313;
@@ -858,7 +858,12 @@ async function handleRequest(request, response) {
 
     if (request.method === "POST" && url.pathname === "/api/compile") {
       const payload = JSON.parse((await readRequestBody(request)).toString("utf8"));
-      const result = compile(String(payload.source || ""));
+      const source = String(payload.source || "");
+      const canPatch = Object.prototype.hasOwnProperty.call(payload, "previousSource")
+        && payload.operation && Array.isArray(payload.operation.ops);
+      const result = canPatch
+        ? compileIncremental(String(payload.previousSource || ""), source, payload.operation)
+        : { mode: "full", ...compile(source) };
       sendJson(response, 200, result);
       return;
     }

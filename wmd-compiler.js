@@ -1107,6 +1107,38 @@ function renderTab(md, tab, env, config) {
   );
 }
 
+function renderTabSection(md, tab, tabs, warnings, config, active = false) {
+  const allHeadings = tabs.flatMap((candidate) => candidate.headings);
+  const headingAnchors = new Map();
+  const tabAnchors = new Map();
+
+  tabs.forEach((candidate) => {
+    if (!tabAnchors.has(candidate.refSlug)) tabAnchors.set(candidate.refSlug, candidate.domId);
+  });
+  allHeadings.forEach((heading) => {
+    if (!headingAnchors.has(heading.anchorKey)) headingAnchors.set(heading.anchorKey, heading.id);
+  });
+
+  const rendered = renderTab(md, tab, {
+    tabAnchors,
+    headingAnchors,
+    warnings,
+    currentTabName: tab.name,
+    currentTabSlug: tab.refSlug,
+    currentTabHeadings: tab.headings,
+    stylePresets: config.stylePresets,
+  }, config);
+  const titleHtml = tab.title
+    ? `<h1 class="tab-title"${tab.titleRange ? ` data-wmd-source-start="${tab.titleRange.start}" data-wmd-source-end="${tab.titleRange.contentEnd}" data-wmd-source-key="${tab.titleRange.start}:${tab.titleRange.contentEnd}"` : ""}>${escapeHtml(tab.title)}</h1>`
+    : "";
+
+  return `
+<section id="${escapeHtml(tab.domId)}" class="tab-section ${active ? "active" : ""}" data-hidden="${tab.hidden ? "true" : "false"}" data-tab-name="${escapeHtml(tab.name)}" data-tab-hidden="${tab.hidden ? "true" : "false"}" data-wmd-source-start="${tab.sourceStart}" data-wmd-source-end="${tab.sourceEnd}" data-wmd-source-key="tab:${tab.sourceStart}">
+${titleHtml}
+${rendered}
+</section>`;
+}
+
 function buildHtml(config, tabs, warnings, sourceLength = 0) {
   const presetCss = stylePresetCss(config.stylePresets);
   const allHeadings = tabs.flatMap((tab) => tab.headings);
@@ -1114,21 +1146,6 @@ function buildHtml(config, tabs, warnings, sourceLength = 0) {
   const visibleHeadings = allHeadings.filter((heading) => !heading.hidden);
   const firstActiveTab = visibleTabs[0] || tabs[0];
   const firstActiveTabId = firstActiveTab ? firstActiveTab.domId : "";
-
-  const headingAnchors = new Map();
-  const tabAnchors = new Map();
-
-  tabs.forEach((tab) => {
-    if (!tabAnchors.has(tab.refSlug)) {
-      tabAnchors.set(tab.refSlug, tab.domId);
-    }
-  });
-
-  allHeadings.forEach((heading) => {
-    if (!headingAnchors.has(heading.anchorKey)) {
-      headingAnchors.set(heading.anchorKey, heading.id);
-    }
-  });
 
   const md = makeMarkdownIt();
 
@@ -1157,28 +1174,7 @@ function buildHtml(config, tabs, warnings, sourceLength = 0) {
     .join("\n");
 
   const tabSections = tabs
-    .map((tab) => {
-      const active = tab.domId === firstActiveTabId ? "active" : "";
-      const rendered = renderTab(md, tab, {
-        tabAnchors,
-        headingAnchors,
-        warnings,
-        currentTabName: tab.name,
-        currentTabSlug: tab.refSlug,
-        currentTabHeadings: tab.headings,
-        stylePresets: config.stylePresets,
-      }, config);
-
-      const titleHtml = tab.title
-        ? `<h1 class="tab-title"${tab.titleRange ? ` data-wmd-source-start="${tab.titleRange.start}" data-wmd-source-end="${tab.titleRange.contentEnd}" data-wmd-source-key="${tab.titleRange.start}:${tab.titleRange.contentEnd}"` : ""}>${escapeHtml(tab.title)}</h1>`
-        : "";
-
-      return `
-<section id="${escapeHtml(tab.domId)}" class="tab-section ${active}" data-hidden="${tab.hidden ? "true" : "false"}" data-tab-name="${escapeHtml(tab.name)}" data-tab-hidden="${tab.hidden ? "true" : "false"}" data-wmd-source-start="${tab.sourceStart}" data-wmd-source-end="${tab.sourceEnd}" data-wmd-source-key="tab:${tab.sourceStart}">
-${titleHtml}
-${rendered}
-</section>`;
-    })
+    .map((tab) => renderTabSection(md, tab, tabs, warnings, config, tab.domId === firstActiveTabId))
     .join("\n");
 
   const finalWarnings = uniqueWarnings(warnings);
@@ -1907,22 +1903,120 @@ ${finalWarnings.map((warning) => `<p>${escapeHtml(warning)}</p>`).join("\n")}
   return { html, warnings: finalWarnings };
 }
 
-function compile(source) {
-  const md = makeMarkdownIt();
-  const { config, vars, tabs } = parseWmd(source);
+function prepareStructure(source) {
+  const sourceText = String(source || "");
+  const { config, vars, tabs } = parseWmd(sourceText);
   const warnings = [];
   const tabsBySlug = finalizeTabs(tabs, warnings);
+  return { source: sourceText, config, vars, tabs, tabsBySlug, warnings };
+}
 
-  for (const tab of tabs) {
-    const withIncludes = resolveIncludes(tab.content.join("\n"), tabsBySlug, warnings, tab.name);
-    tab.resolvedContent = applyVars(withIncludes, vars, warnings, tab.name);
+function prepareDocument(source) {
+  const prepared = prepareStructure(source);
+  const md = makeMarkdownIt();
+
+  for (const tab of prepared.tabs) {
+    const withIncludes = resolveIncludes(tab.content.join("\n"), prepared.tabsBySlug, prepared.warnings, tab.name);
+    tab.resolvedContent = applyVars(withIncludes, prepared.vars, prepared.warnings, tab.name);
   }
 
-  for (const tab of tabs) {
-    tab.headings = collectHeadings(md, tab, config);
+  for (const tab of prepared.tabs) {
+    tab.headings = collectHeadings(md, tab, prepared.config);
   }
 
-  return buildHtml(config, tabs, warnings, String(source || "").length);
+  return { ...prepared, md };
+}
+
+function compile(source) {
+  const prepared = prepareDocument(source);
+  return buildHtml(prepared.config, prepared.tabs, prepared.warnings, prepared.source.length);
+}
+
+function operationBounds(operation) {
+  if (!operation || !Array.isArray(operation.ops)) return null;
+  let oldPosition = 0;
+  let newPosition = 0;
+  const bounds = { oldStart: Infinity, oldEnd: -Infinity, newStart: Infinity, newEnd: -Infinity };
+  for (const part of operation.ops) {
+    if (typeof part === "string") {
+      bounds.oldStart = Math.min(bounds.oldStart, oldPosition);
+      bounds.oldEnd = Math.max(bounds.oldEnd, oldPosition);
+      bounds.newStart = Math.min(bounds.newStart, newPosition);
+      newPosition += part.length;
+      bounds.newEnd = Math.max(bounds.newEnd, newPosition);
+    } else if (Number.isSafeInteger(part) && part > 0) {
+      oldPosition += part;
+      newPosition += part;
+    } else if (Number.isSafeInteger(part) && part < 0) {
+      bounds.oldStart = Math.min(bounds.oldStart, oldPosition);
+      bounds.oldEnd = Math.max(bounds.oldEnd, oldPosition - part);
+      bounds.newStart = Math.min(bounds.newStart, newPosition);
+      bounds.newEnd = Math.max(bounds.newEnd, newPosition);
+      oldPosition -= part;
+    } else {
+      return null;
+    }
+  }
+  if (!Number.isFinite(bounds.oldStart)) return null;
+  return { ...bounds, oldLength: oldPosition, newLength: newPosition };
+}
+
+function tabIndexAtOffset(tabs, offset) {
+  const position = Math.max(0, Number(offset) || 0);
+  let match = -1;
+  tabs.forEach((tab, index) => {
+    if (tab.sourceStart <= position && position <= tab.sourceEnd) match = index;
+  });
+  return match;
+}
+
+function changedLineText(source, start, end) {
+  const low = Math.max(0, Number(start) || 0);
+  const high = Math.max(low, Number(end) || low);
+  return sourceLineRecords(source)
+    .filter((record) => record.start <= high && record.end >= low)
+    .map((record) => record.text)
+    .join("\n");
+}
+
+function requiresFullCompile(previous, next, bounds) {
+  if (bounds.oldLength !== previous.source.length || bounds.newLength !== next.source.length) return true;
+  if (previous.tabs.length !== next.tabs.length) return true;
+  if (/@(?:include|embed)\s+/im.test(previous.source) || /@(?:include|embed)\s+/im.test(next.source)) return true;
+  if (previous.tabs.some((tab, index) => {
+    const candidate = next.tabs[index];
+    return !candidate || tab.domId !== candidate.domId || tab.name !== candidate.name || tab.hidden !== candidate.hidden;
+  })) return true;
+
+  const oldTabIndex = tabIndexAtOffset(previous.tabs, bounds.oldStart);
+  const newTabIndex = tabIndexAtOffset(next.tabs, bounds.newStart);
+  if (oldTabIndex < 0 || newTabIndex < 0 || oldTabIndex !== newTabIndex) return true;
+  if (bounds.oldEnd > previous.tabs[oldTabIndex].sourceEnd || bounds.newEnd > next.tabs[newTabIndex].sourceEnd) return true;
+
+  const structuralLine = /^\s*@(config|endconfig|var|tab|hidden|include|embed)\b/im;
+  if (structuralLine.test(changedLineText(previous.source, bounds.oldStart, bounds.oldEnd))) return true;
+  if (structuralLine.test(changedLineText(next.source, bounds.newStart, bounds.newEnd))) return true;
+  return false;
+}
+
+function compileIncremental(previousSource, source, operation) {
+  const previous = prepareStructure(previousSource);
+  const next = prepareDocument(source);
+  const bounds = operationBounds(operation);
+  if (!bounds || requiresFullCompile(previous, next, bounds)) {
+    return { mode: "full", ...buildHtml(next.config, next.tabs, next.warnings, next.source.length) };
+  }
+
+  const tabIndex = tabIndexAtOffset(next.tabs, bounds.newStart);
+  const tab = next.tabs[tabIndex];
+  const html = renderTabSection(next.md, tab, next.tabs, next.warnings, next.config, false);
+  return {
+    mode: "patch",
+    html,
+    tabId: tab.domId,
+    sourceLength: next.source.length,
+    warnings: uniqueWarnings(next.warnings),
+  };
 }
 
 function ensureParentDirectory(filePath) {
@@ -2319,6 +2413,7 @@ module.exports = {
   DEFAULT_OUTPUT_PATH,
   DEFAULT_PORT,
   compile,
+  compileIncremental,
   compileFile,
   parseArgs,
   startPreviewServer,
