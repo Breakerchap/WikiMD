@@ -68,6 +68,18 @@ test("simultaneous document and WMD edits converge through OT", () => {
   assert.equal(applyOperation(applyOperation(original, remoteEdit), documentPrime), "@tab Home\n\nParagraph here!\n\nRemote Tail");
 });
 
+test("stale document ranges relocate after a simultaneous WMD insertion", () => {
+  const original = "@tab Home\n\nFirst block.\n\nEditable block.\n\nTail.";
+  const staleRange = rangeOf(original, "Editable block.");
+  const current = original.replace("First block.", "Raw insertion before the block.\n\nFirst block.");
+  const operation = operationForSerializedRange(current, staleRange, "Editable block.", "Editable block!");
+
+  assert.equal(
+    applyOperation(current, operation),
+    current.replace("Editable block.", "Editable block!"),
+  );
+});
+
 test("temporarily invalid WMD outside an edited source range is preserved byte-for-byte", () => {
   const invalidPrefix = "@config\nbroken: {{{\n\n";
   const source = `${invalidPrefix}@tab Home\n\nEditable text\n\n!unclosed`;

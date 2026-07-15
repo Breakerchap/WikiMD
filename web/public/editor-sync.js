@@ -229,11 +229,36 @@
     return { operation: rebased, externalOperations: transformedExternalOperations };
   }
 
+  function uniqueSerializedRange(source, serialized) {
+    if (!serialized) return null;
+    const first = source.indexOf(serialized);
+    if (first === -1) return null;
+    if (source.indexOf(serialized, first + 1) !== -1) return null;
+    return { start: first, end: first + serialized.length };
+  }
+
   function operationForSerializedRange(source, range, beforeSerialized, afterSerialized) {
-    const start = Math.max(0, Math.min(source.length, Number(range && range.start) || 0));
-    const end = Math.max(start, Math.min(source.length, Number(range && range.end) || 0));
+    source = String(source || "");
+    beforeSerialized = String(beforeSerialized || "");
+    afterSerialized = String(afterSerialized || "");
+    let start = Math.max(0, Math.min(source.length, Number(range && range.start) || 0));
+    let end = Math.max(start, Math.min(source.length, Number(range && range.end) || 0));
     const local = operationFromTextDiff(beforeSerialized, afterSerialized);
     if (!local) return null;
+
+    // Canvas source ranges belong to the exact WMD revision that produced the
+    // current DOM. A simultaneous raw edit can insert text before that block
+    // before the parent has patched the iframe, leaving the numeric offsets stale.
+    // When the serialised block still occurs exactly once, relocate to that unique
+    // occurrence instead of applying the document edit to unrelated source text.
+    if (source.slice(start, end) !== beforeSerialized) {
+      const relocated = uniqueSerializedRange(source, beforeSerialized);
+      if (relocated) {
+        start = relocated.start;
+        end = relocated.end;
+      }
+    }
+
     const sourceSlice = source.slice(start, end);
     const bridge = operationFromTextDiff(beforeSerialized, sourceSlice);
     const translated = bridge ? transformOperations(local, bridge)[0] : local;
