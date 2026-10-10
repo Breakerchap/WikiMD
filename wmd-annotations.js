@@ -201,4 +201,19 @@ function installAnnotations(md) {
   };
   md.renderer.rules.wmd_numbered_close = () => "</div></figure>\n";
 }
-module.exports = { createTargetRegistry, registerTargets, extractNotes, createNoteState, renderNotes, installAnnotations };
+function annotationCss() {
+  return [
+    ".wmd-note-ref{font-size:.75em;vertical-align:super;line-height:0}",
+    ".wmd-note-ref a,.wmd-cross-reference{text-decoration:none}",
+    ".wmd-footnotes,.wmd-endnotes{margin:2.5rem 0 1.5rem;border-top:1px solid var(--border,#ddd);padding-top:1rem;font-size:.92em}",
+    ".wmd-footnotes h2,.wmd-endnotes h2{font-size:1.1em;margin-top:0}",
+    ".wmd-footnotes li,.wmd-endnotes li{margin-bottom:.6em}",
+    ".wmd-footnotes li>p,.wmd-endnotes li>p{display:inline;margin:0}",
+    ".wmd-note-backref{margin-left:.4em;text-decoration:none}",
+    ".wmd-numbered{margin:1.4em 0;padding:.4em 0}",
+    ".wmd-numbered figcaption{font-weight:600;margin-bottom:.6em}",
+    ".wmd-numbered-body>:first-child{margin-top:0}",
+    ".wmd-numbered-body>:last-child{margin-bottom:0}"
+  ].join("\n");
+}
+module.exports = { createTargetRegistry, registerTargets, extractNotes, createNoteState, renderNotes, installAnnotations, annotationCss };
