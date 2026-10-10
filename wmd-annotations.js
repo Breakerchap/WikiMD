@@ -123,7 +123,7 @@ function renderNotes(md, env) {
 }
 
 function installAnnotations(md) {
-  md.inline.ruler.before("wiki_link", "wmd_crossref", (state, silent) => {
+  md.inline.ruler.before("link", "wmd_crossref", (state, silent) => {
     const match = state.src.slice(state.pos).match(/^\[\[(fig|tbl|eq):([A-Za-z][\w-]*)\]\]/);
     if (!match) return false;
     const target = state.env.targets && state.env.targets.items.get(match[1] + ":" + match[2].toLowerCase());
