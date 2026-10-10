@@ -176,6 +176,63 @@ Hidden content.
   assert.ok(result.html.includes("<summary>More</summary>"));
 });
 
+test("collapses can nest to multiple levels with correctly paired endings", () => {
+  const result = renderFragment(`@collapse Outer
+Before the inner section.
+@collapse Inner
+Inner content.
+@collapse Deepest
+Deep content.
+@endcollapse
+Back in the inner section.
+@endcollapse
+Back in the outer section.
+@endcollapse
+Outside the collapse.`);
+
+  const html = result.html;
+  assert.equal((html.match(/<details class="collapse">/g) || []).length, 3);
+  assert.equal((html.match(/<\\/details>/g) || []).length, 3);
+  assert.match(html, /<summary>Outer<\\/summary>[\\s\\S]*<summary>Inner<\\/summary>[\\s\\S]*<summary>Deepest<\\/summary>/);
+  assert.match(html, /Deep content\\.<\\/p>[\\s\\S]*<\\/details>[\\s\\S]*Back in the inner section\\./);
+  assert.match(html, /Back in the inner section\\.<\\/p>[\\s\\S]*<\\/details>[\\s\\S]*Back in the outer section\\./);
+  assert.match(html, /Back in the outer section\\.<\\/p>[\\s\\S]*<\\/details>[\\s\\S]*Outside the collapse\\./);
+});
+
+test("nested and sequential collapses render without blank lines between directives", () => {
+  const result = renderFragment(`@collapse First
+@collapse Nested
+Nested content.
+@endcollapse
+@endcollapse
+@collapse Second
+Other content.
+@endcollapse`);
+
+  assert.equal((result.html.match(/<details class="collapse">/g) || []).length, 3);
+  assert.match(result.html, /<summary>First<\\/summary>[\\s\\S]*<summary>Nested<\\/summary>/);
+  assert.match(result.html, /<\\/details>\\s*<details class="collapse">\\s*<summary>Second<\\/summary>/);
+  assert.match(result.html, /Other content\\./);
+});
+
+test("collapse markers inside fenced code do not close or nest sections", () => {
+  const result = renderFragment(`@collapse Outer
+\`\`\`wmd
+@collapse Example
+@endcollapse
+\`\`\`
+@collapse Inner
+Inner content.
+@endcollapse
+@endcollapse
+Outside.`);
+
+  assert.equal((result.html.match(/<details class="collapse">/g) || []).length, 2);
+  assert.match(result.html, /<code class="language-wmd">[\\s\\S]*@collapse Example[\\s\\S]*@endcollapse/);
+  assert.match(result.html, /<summary>Inner<\\/summary>[\\s\\S]*Inner content\\./);
+  assert.match(result.html, /<\\/details>[\\s\\S]*<p>Outside\\.<\\/p>/);
+});
+
 test("prose blocks render inside collapsible sections without a blank line", () => {
   const result = compile(`@tab Home
 @collapse Prose
