@@ -4,7 +4,7 @@ const http = require("http");
 const path = require("path");
 const MarkdownIt = require("markdown-it");
 const { startDirective, endDirective, matchesEnd, findBlockEnd, validateBlocks } = require("./wmd-structure.js");
-const { createTargetRegistry, registerTargets, extractNotes, createNoteState, renderNotes, installAnnotations } = require("./wmd-annotations.js");
+const { createTargetRegistry, registerTargets, extractNotes, createNoteState, renderNotes, installAnnotations, annotationCss } = require("./wmd-annotations.js");
 
 const DEFAULT_PORT = 4312;
 const WATCH_DEBOUNCE_MS = 120;
@@ -1619,7 +1619,7 @@ function renderFragment(source, options = {}) {
 
   return {
     html: restoreMathDelimiters(html, math.values),
-    css: stylePresetCss(parsed.config.stylePresets),
+    css: annotationCss() + '\n' + stylePresetCss(parsed.config.stylePresets),
     warnings: uniqueWarnings([...warnings, ...diagnostics.map(d => 'line ' + d.line + ': ' + d.message)]),
     diagnostics,
   };
