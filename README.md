@@ -144,7 +144,7 @@ Indent subsequent lines by at least two spaces to continue a definition.
 A statement with a footnote[^proof] and a later endnote[^end:aside].
 A second reference to the same footnote[^proof].
 
-[^proof]: A *formatted* explanation, with [[Home|links]].
+[^proof]: A *formatted* explanation, with [links](https://example.com).
   This continues the footnote.
 
 [^end:aside]: An endnote, collected separately at the end.
