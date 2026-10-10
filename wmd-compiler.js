@@ -1231,15 +1231,44 @@ function resolveIncludes(markdown, tabsBySlug, warnings, sourceTabName, stack = 
   return out.join("\n");
 }
 
+// Keep variable substitution out of inline code spans as well as fenced code.
+function transformOutsideInlineCode(line, transform) {
+  const tick = String.fromCharCode(96);
+  let start = 0;
+  let i = 0;
+  let result = "";
+  while (i < line.length) {
+    if (line[i] !== tick) { i++; continue; }
+    let escapes = 0;
+    for (let prev = i - 1; prev >= 0 && line[prev] === "\\"; prev--) escapes++;
+    if (escapes % 2) { i++; continue; }
+    let count = 1;
+    while (line[i + count] === tick) count++;
+    let closing = -1;
+    for (let j = i + count; j < line.length;) {
+      if (line[j] !== tick) { j++; continue; }
+      let length = 1;
+      while (line[j + length] === tick) length++;
+      if (length === count) { closing = j; break; }
+      j += length;
+    }
+    if (closing < 0) { i += count; continue; }
+    result += transform(line.slice(start, i)) + line.slice(i, closing + count);
+    start = closing + count;
+    i = start;
+  }
+  return result + transform(line.slice(start));
+}
+
 function applyVars(markdown, vars, warnings, sourceTabName) {
-  return transformOutsideFencedCode(markdown, (line) => line.replace(/(?<!\\)\{\{([A-Za-z][\w-]*)\}\}/g, (match, name) => {
+  return transformOutsideFencedCode(markdown, (line) => transformOutsideInlineCode(line, segment => segment.replace(/(?<!\\)\{\{([A-Za-z][\w-]*)\}\}/g, (match, name) => {
     if (Object.prototype.hasOwnProperty.call(vars, name)) {
       return vars[name];
     }
 
     warnings.push(`Unknown variable in ${sourceTabName}: {{${name}}}`);
     return match;
-  }));
+  })));
 }
 
 function uniqueWarnings(warnings) {
