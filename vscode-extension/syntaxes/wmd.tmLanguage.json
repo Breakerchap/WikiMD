@@ -242,6 +242,12 @@
           },
           "patterns": [
             {
+              "include": "#code-fences"
+            },
+            {
+              "include": "#wmd-collapse-blocks"
+            },
+            {
               "include": "#wiki-links"
             },
             {
