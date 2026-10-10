@@ -10,7 +10,7 @@ const kindPrefix = { figure: "fig", table: "tbl", equation: "eq" };
 const kindNames = { figure: "Figure", table: "Table", equation: "Equation" };
 function slug(text) { return String(text).toLowerCase().replace(/[^\w-]/g, "-"); }
 function fenceStart(line) {
-  const match = String(line).match(/^ {0,3}(''|`{3,}|~{3,})/);
+  const match = String(line).match(/^ {0,3}(`{3,}|~{3,})/);
   return match ? { marker: match[1][0], length: match[1].length } : null;
 }
 function fenceEnd(line, fence) {
