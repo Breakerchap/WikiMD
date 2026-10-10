@@ -274,10 +274,10 @@ test("generic @end closes the innermost @ block", () => {
 });
 
 test("line-numbered diagnostics report mismatched and unclosed blocks", () => {
-  const result = renderFragment("@collapse Outer\n!note Inner\n@endcollapse\n!end\n@endcollapse");
-  assert.deepEqual(result.diagnostics.map(d => d.line), [3, 5]);
+  const result = renderFragment("@collapse Outer\n!note Inner\n@endcollapse\n!end\n@endcollapse\n@endcollapse");
+  assert.deepEqual(result.diagnostics.map(d => d.line), [3, 6]);
   assert.match(result.warnings.join("\n"), /line 3: @endcollapse cannot close @callout/);
-  assert.match(result.warnings.join("\n"), /line 5: Unmatched @endcollapse/);
+  assert.match(result.warnings.join("\n"), /line 6: Unmatched @endcollapse/);
   assert.throws(() => renderFragment("@collapse A\nNothing", { strict: true }), /line 1: Unclosed @collapse/);
   assert.throws(() => compile("@tab Home\n!note A\nNo ending", { strict: true }), /line 2: Unclosed callout/);
 });
