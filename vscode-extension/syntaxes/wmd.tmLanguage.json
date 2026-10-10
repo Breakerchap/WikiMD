@@ -4,6 +4,18 @@
   "scopeName": "text.wmd",
   "patterns": [
     {
+      "include": "#wmd-numbered-blocks"
+    },
+    {
+      "include": "#footnote-definitions"
+    },
+    {
+      "include": "#academic-crossrefs"
+    },
+    {
+      "include": "#footnote-references"
+    },
+    {
       "include": "#config-block"
     },
     {
@@ -79,7 +91,7 @@
           "name": "keyword.control.directive.config.begin.wmd"
         }
       },
-      "end": "^(@endconfig)\\s*$",
+      "end": "^(@endconfig|@end)\\s*$",
       "endCaptures": {
         "1": {
           "name": "keyword.control.directive.config.end.wmd"
@@ -191,6 +203,24 @@
           },
           "patterns": [
             {
+              "include": "#code-fences"
+            },
+            {
+              "include": "#wmd-callout-blocks"
+            },
+            {
+              "include": "#wmd-collapse-blocks"
+            },
+            {
+              "include": "#wmd-numbered-blocks"
+            },
+            {
+              "include": "#footnote-references"
+            },
+            {
+              "include": "#academic-crossrefs"
+            },
+            {
               "include": "#wiki-links"
             },
             {
@@ -234,13 +264,25 @@
               "name": "entity.name.section.collapse-title.wmd"
             }
           },
-          "end": "^\\s*(@endcollapse)\\s*$",
+          "end": "^\\s*(@endcollapse|@end)\\s*$",
           "endCaptures": {
             "1": {
               "name": "keyword.control.directive.collapse.end.wmd"
             }
           },
           "patterns": [
+            {
+              "include": "#wmd-callout-blocks"
+            },
+            {
+              "include": "#wmd-numbered-blocks"
+            },
+            {
+              "include": "#footnote-references"
+            },
+            {
+              "include": "#academic-crossrefs"
+            },
             {
               "include": "#code-fences"
             },
@@ -283,6 +325,14 @@
     },
     "wmd-directives": {
       "patterns": [
+        {
+          "match": "^\\s*(@end(?:style|collapse|tabstops|config|figure|table|equation)?)\\s*$",
+          "captures": {
+            "1": {
+              "name": "keyword.control.directive.end.wmd"
+            }
+          }
+        },
         {
           "match": "^\\s*(@hidden)\\s*$",
           "captures": {
@@ -724,7 +774,7 @@
               "name": "constant.numeric.tabstop-positions.wmd"
             }
           },
-          "end": "^\\s*(@endtabstops)\\s*$",
+          "end": "^\\s*(@endtabstops|@end)\\s*$",
           "endCaptures": {
             "1": {
               "name": "keyword.control.directive.tabstops.end.wmd"
@@ -769,6 +819,135 @@
               "include": "#highlight-red"
             }
           ]
+        }
+      ]
+    },
+    "wmd-numbered-blocks": {
+      "patterns": [
+        {
+          "name": "meta.numbered.wmd",
+          "begin": "^\\s*(@(?:figure|table|equation))\\s+([A-Za-z][\\w-]*)(?:\\s*\\|\\s*(.*))?$",
+          "beginCaptures": {
+            "1": {
+              "name": "keyword.control.directive.numbered.begin.wmd"
+            },
+            "2": {
+              "name": "entity.name.label.wmd"
+            },
+            "3": {
+              "name": "string.unquoted.caption.wmd"
+            }
+          },
+          "end": "^\\s*(@end(?:figure|table|equation)?)\\s*$",
+          "endCaptures": {
+            "1": {
+              "name": "keyword.control.directive.numbered.end.wmd"
+            }
+          },
+          "patterns": [
+            {
+              "include": "#code-fences"
+            },
+            {
+              "include": "#wmd-numbered-blocks"
+            },
+            {
+              "include": "#wmd-callout-blocks"
+            },
+            {
+              "include": "#wmd-collapse-blocks"
+            },
+            {
+              "include": "#wmd-directives"
+            },
+            {
+              "include": "#footnote-references"
+            },
+            {
+              "include": "#academic-crossrefs"
+            },
+            {
+              "include": "#wiki-links"
+            },
+            {
+              "include": "#standard-links"
+            },
+            {
+              "include": "#bold"
+            },
+            {
+              "include": "#italic"
+            },
+            {
+              "include": "#lists"
+            }
+          ]
+        }
+      ]
+    },
+    "footnote-definitions": {
+      "patterns": [
+        {
+          "name": "meta.note.definition.wmd",
+          "match": "^\\s*(\\[\\^)((?:end:)?[A-Za-z0-9_-]+)(\\]:)(.*)$",
+          "captures": {
+            "1": {
+              "name": "punctuation.definition.note.wmd"
+            },
+            "2": {
+              "name": "entity.name.note.wmd"
+            },
+            "3": {
+              "name": "punctuation.definition.note.wmd"
+            },
+            "4": {
+              "name": "string.unquoted.note-body.wmd"
+            }
+          }
+        }
+      ]
+    },
+    "footnote-references": {
+      "patterns": [
+        {
+          "name": "markup.underline.note.reference.wmd",
+          "match": "(?<!\\\\)(\\[\\^)((?:end:)?[A-Za-z0-9_-]+)(\\])",
+          "captures": {
+            "1": {
+              "name": "punctuation.definition.note.wmd"
+            },
+            "2": {
+              "name": "variable.other.note-reference.wmd"
+            },
+            "3": {
+              "name": "punctuation.definition.note.wmd"
+            }
+          }
+        }
+      ]
+    },
+    "academic-crossrefs": {
+      "patterns": [
+        {
+          "name": "meta.cross-reference.wmd",
+          "match": "(?<!\\\\)(\\[\\[)(fig|tbl|eq)(:)([A-Za-z][\\w-]*)(\\]\\])",
+          "captures": {
+            "1": {
+              "name": "punctuation.definition.link.begin.wmd"
+            },
+            "2": {
+              "name": "support.type.reference-kind.wmd"
+            },
+            "3": {
+              "name": "punctuation.separator.wmd"
+            },
+            "4": {
+              "name": "variable.other.cross-reference.wmd"
+            },
+            "5": {
+              "name": "punctuation.definition.link.end.wmd"
+            }
+          }
         }
       ]
     }
