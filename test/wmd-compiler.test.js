@@ -352,6 +352,34 @@ test("footnote definitions in fences are not parsed", () => {
   assert.match(html, /id="wmd-fn-document-real"/);
 });
 
+
+test("generic @end supports config, styles, tab-stop rulers and numbered blocks", () => {
+  const source = [
+    "@config", "font: Georgia", "@end",
+    "@collapse Parent", "@style Large", "Styled text.", "@end",
+    "@tabstops 8em", "Left \\tab Right", "@end", "@end",
+    "@figure test | Caption", "Content.", "@end"
+  ].join("\n");
+  const result = renderFragment(source, { strict: true });
+  assert.equal(result.diagnostics.length, 0);
+  assert.match(result.html, /<details class="collapse">/);
+  assert.match(result.html, /class="wmd-tab-stops"/);
+  assert.match(result.html, /class="wmd-numbered wmd-figure"/);
+  assert.match(result.html, /Styled text\./);
+});
+
+test("annotated fragments include CSS for footnotes and figures", () => {
+  const result = renderFragment("Text[^one].\n[^one]: A note.");
+  assert.match(result.css, /\.wmd-footnotes/);
+  assert.match(result.css, /\.wmd-numbered/);
+});
+
+test("strict option is accepted by the command-line argument parser", () => {
+  const args = parseArgs(["--strict", "notes.wmd"]);
+  assert.equal(args.strict, true);
+  assert.equal(args.inputPath, "notes.wmd");
+});
+
 test("duplicate tab names are warned about and get unique section ids", () => {
   const source = `@tab Combat
 # One
