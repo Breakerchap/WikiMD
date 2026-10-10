@@ -328,13 +328,13 @@ function formatWmd(text) {
       continue;
     }
 
-    if (/^(!(?:note|tip|info|warning|danger|rule|example)|@collapse)\b/.test(line)) {
+    if (/^(!(?:note|tip|info|warning|danger|rule|example)|@(?:collapse|figure|table|equation|tabstops))\b/.test(line)) {
       pushBlank();
       pushLine(line);
       continue;
     }
 
-    if (/^(!end|@endcollapse)\s*$/.test(line)) {
+    if (/^(!end|@end(?:collapse|figure|table|equation|style|tabstops)?)\s*$/.test(line)) {
       pushLine(line);
       pushBlank();
       continue;
