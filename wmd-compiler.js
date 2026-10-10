@@ -520,14 +520,30 @@ function collapsePlugin(md) {
     if (!match) return false;
 
     let nextLine = startLine + 1;
+    let depth = 1;
+    let fence = null;
     const contentLines = [];
 
     while (nextLine < endLine) {
       const pos = state.bMarks[nextLine] + state.tShift[nextLine];
       const lineMax = state.eMarks[nextLine];
       const text = state.src.slice(pos, lineMax);
+      const trimmed = text.trim();
 
-      if (text.trim() === "@endcollapse") break;
+      // A fenced code example can contain literal collapse directives.
+      if (fence) {
+        if (isFenceEnd(text, fence)) fence = null;
+      } else {
+        const openingFence = getFenceStart(text);
+        if (openingFence) {
+          fence = openingFence;
+        } else if (/^@collapse(?:\s+(.+))?$/.test(trimmed)) {
+          depth++;
+        } else if (trimmed === "@endcollapse") {
+          depth--;
+          if (depth === 0) break;
+        }
+      }
 
       contentLines.push(text);
       nextLine++;
@@ -543,7 +559,11 @@ function collapsePlugin(md) {
       title: (match[1] || "Details").trim(),
     };
 
+    const nestedStart = state.tokens.length;
     state.md.block.parse(contentLines.join("\n"), state.md, state.env, state.tokens);
+    for (const token of state.tokens.slice(nestedStart)) {
+      if (token.map) token.map = [token.map[0] + startLine + 1, token.map[1] + startLine + 1];
+    }
 
     state.push("wmd_collapse_close", "details", -1);
     state.line = nextLine + 1;
