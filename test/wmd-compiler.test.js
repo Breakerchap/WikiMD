@@ -380,6 +380,15 @@ test("strict option is accepted by the command-line argument parser", () => {
   assert.equal(args.inputPath, "notes.wmd");
 });
 
+test("variables remain literal in inline code while expanding in surrounding prose", () => {
+  const tick = String.fromCharCode(96);
+  const result = renderFragment(["@var name = Expanded",
+    tick + "{{name}}" + tick + " and {{name}} and \\{{name}}"
+  ].join("\n"));
+  assert.match(result.html, /<code>\{\{name\}\}<\/code> and Expanded and \{\{name\}\}/);
+  assert.equal(result.warnings.length, 0);
+});
+
 test("duplicate tab names are warned about and get unique section ids", () => {
   const source = `@tab Combat
 # One
