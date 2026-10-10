@@ -250,6 +250,108 @@ Stand in the desert.
   assert.ok(!result.html.includes("[[["));
 });
 
+
+test("nested callouts pair inner blocks and preserve outer text", () => {
+  const html = renderFragment([
+    "!note Outer", "Before.", "@collapse Optional", "!warning Inner",
+    "Inner warning", "!end", "@end", "After inner.", "!end", "Outside."
+  ].join("\n")).html;
+  assert.equal((html.match(/class="callout callout-note"/g) || []).length, 1);
+  assert.equal((html.match(/class="callout callout-warning"/g) || []).length, 1);
+  assert.equal((html.match(/<details class="collapse">/g) || []).length, 1);
+  assert.match(html, /Inner warning[\s\S]*<\/details>[\s\S]*After inner\./);
+  assert.match(html, /After inner\.[\s\S]*<\/div>\s*<\/div>[\s\S]*Outside\./);
+});
+
+test("generic @end closes the innermost @ block", () => {
+  const html = renderFragment([
+    "@collapse Parent", "@collapse Child", "Inside child.", "@end",
+    "Still inside parent.", "@end", "Outside."
+  ].join("\n"), { strict: true }).html;
+  assert.equal((html.match(/<details class="collapse">/g) || []).length, 2);
+  assert.match(html, /Inside child\.[\s\S]*<\/details>[\s\S]*Still inside parent\./);
+  assert.match(html, /Still inside parent\.[\s\S]*<\/details>[\s\S]*Outside\./);
+});
+
+test("line-numbered diagnostics report mismatched and unclosed blocks", () => {
+  const result = renderFragment("@collapse Outer\n!note Inner\n@endcollapse\n!end\n@endcollapse");
+  assert.deepEqual(result.diagnostics.map(d => d.line), [3, 5]);
+  assert.match(result.warnings.join("\n"), /line 3: @endcollapse cannot close @callout/);
+  assert.match(result.warnings.join("\n"), /line 5: Unmatched @endcollapse/);
+  assert.throws(() => renderFragment("@collapse A\nNothing", { strict: true }), /line 1: Unclosed @collapse/);
+  assert.throws(() => compile("@tab Home\n!note A\nNo ending", { strict: true }), /line 2: Unclosed callout/);
+});
+
+test("footnotes get reference-order numbering and repeated reference back-links", () => {
+  const html = renderFragment([
+    "First[^b] and second[^a] and again[^b].",
+    "", "[^a]: Second note.", "[^b]: First *important* note."
+  ].join("\n")).html;
+  assert.match(html, /id="wmd-fn-document-b-ref-0"/);
+  assert.match(html, /id="wmd-fn-document-b-ref-1"/);
+  assert.match(html, /id="wmd-fn-document-b"[\s\S]*First <strong>important<\/strong> note/);
+  assert.match(html, /id="wmd-fn-document-a"[\s\S]*Second note/);
+  assert.equal((html.match(/class="wmd-note-backref"/g) || []).length, 3);
+  assert.doesNotMatch(html, /\[\^a\]:|\[\^b\]:/);
+});
+
+test("endnotes and multiline footnote definitions are distinct", () => {
+  const result = renderFragment([
+    "A footnote[^one] and an endnote[^end:two].", "",
+    "[^one]: Footnote body.", "[^end:two]: An endnote.", "  Its second line."
+  ].join("\n"));
+  assert.match(result.html, /class="wmd-footnotes"/);
+  assert.match(result.html, /class="wmd-endnotes"/);
+  assert.match(result.html, /An endnote\.[\s\S]*Its second line/);
+  assert.equal(result.warnings.length, 0);
+});
+
+test("figures tables and equations generate numbered cross-references", () => {
+  const result = renderFragment([
+    "See [[fig:graph]], [[tbl:data]] and [[eq:identity]].",
+    "@figure graph | A plotted relationship", "![alt](example.png)", "@endfigure",
+    "@table data | Measurements", "| x | y |", "| - | - |", "| 1 | 2 |", "@end",
+    "@equation identity | An identity", "$x=x$", "@endequation"
+  ].join("\n"));
+  assert.match(result.html, /href="#wmd-fig-document-graph"[^>]*>Figure 1<\/a>/);
+  assert.match(result.html, /href="#wmd-tbl-document-data"[^>]*>Table 1<\/a>/);
+  assert.match(result.html, /href="#wmd-eq-document-identity"[^>]*>Equation \(1\)<\/a>/);
+  assert.match(result.html, /<figcaption>Figure 1\. A plotted relationship<\/figcaption>/);
+  assert.match(result.html, /<figcaption>Table 1\. Measurements<\/figcaption>/);
+  assert.match(result.html, /<figcaption>Equation \(1\)\. An identity<\/figcaption>/);
+  assert.equal(result.warnings.length, 0);
+});
+
+test("cross-references resolve across tabs and missing targets warn", () => {
+  const result = compile(["@tab Summary", "See [[fig:graph]] and [[fig:missing]].",
+    "@tab Research", "@figure graph | Cross-tab diagram", "Content.", "@end"].join("\n"));
+  assert.match(result.html, /href="#wmd-fig-research-graph"[^>]*>Figure 1<\/a>/);
+  assert.match(result.warnings.join("\n"), /Unknown cross-reference: \[\[fig:missing\]\]/);
+});
+
+test("escaped directives variables references and fenced examples are literal", () => {
+  const result = renderFragment([
+    "@var name = replaced", "\\@collapse Literal", "\\{{name}}",
+    "\\[[fig:graph]]", "\\[^note]", "~~~wmd",
+    "@figure fake | In code", "@end", "~~~"
+  ].join("\n"));
+  assert.doesNotMatch(result.html, /<details class="collapse">|class="wmd-numbered"/);
+  assert.match(result.html, /@collapse Literal/);
+  assert.match(result.html, /\{\{name\}\}/);
+  assert.match(result.html, /\[\[fig:graph\]\]/);
+  assert.match(result.html, /\[\^note\]/);
+  assert.equal(result.warnings.length, 0);
+});
+
+test("footnote definitions in fences are not parsed", () => {
+  const html = renderFragment([
+    "~~~wmd", "[^example]: Literal example.", "~~~",
+    "A note[^real].", "[^real]: Actual definition."
+  ].join("\n")).html;
+  assert.match(html, /<code class="language-wmd">[\s\S]*\[\^example\]: Literal example/);
+  assert.match(html, /id="wmd-fn-document-real"/);
+});
+
 test("duplicate tab names are warned about and get unique section ids", () => {
   const source = `@tab Combat
 # One
