@@ -133,6 +133,97 @@ Back inside the outer section.
 @endcollapse
 ```
 
+### Footnotes and endnotes
+
+Footnotes are numbered automatically in first-reference order, with links
+from the reference to the note and return links from the note to every
+occurrence. Definitions can appear anywhere in the same tab or fragment.
+Indent subsequent lines by at least two spaces to continue a definition.
+
+```wmd
+A statement with a footnote[^proof] and a later endnote[^end:aside].
+A second reference to the same footnote[^proof].
+
+[^proof]: A *formatted* explanation, with [[Home|links]].
+  This continues the footnote.
+
+[^end:aside]: An endnote, collected separately at the end.
+```
+
+Footnotes use `[^key]` / `[^key]:`. Endnotes use
+`[^end:key]` / `[^end:key]:`. Identifiers may contain letters, digits,
+hyphens and underscores. An undefined reference produces a compiler warning.
+Numbering restarts in each tab; the standalone fragment has its own notes.
+
+### Numbered figures, tables and equations
+
+Mark a figure, table or equation with a unique label and optional caption.
+Cross-references are resolved across tabs, with independent numbering for
+each kind. Use `[[fig:label]]`, `[[tbl:label]]` and `[[eq:label]]`:
+
+```wmd
+As shown in [[fig:trend]], the values rise. See also
+[[tbl:results]] and [[eq:identity]].
+
+@figure trend | A trend over time
+![Chart](chart.png)
+@endfigure
+
+@table results | Measurements
+| Input | Output |
+| ----- | ------ |
+| 1     | 2      |
+@endtable
+
+@equation identity | A simple identity
+$$x=x$$
+@endequation
+```
+
+Each reference displays its type and number, for example _Figure 1_ or
+_Equation (1)_, linking to the labelled block. Labels are unique for each
+type across the document. Unresolved references and duplicate labels warn.
+
+### Nested blocks and closing directives
+
+Callouts can contain other callouts, collapses or numbered blocks. `!end`
+closes the most recent callout; `@end` closes the innermost `@` block,
+including a collapse, style, tab-stop ruler, figure, table or equation.
+Specific closers such as `@endcollapse`, `@endstyle` and `@endfigure`
+remain supported.
+
+```wmd
+!note A note
+@collapse Further explanation
+!warning A warning inside the collapse
+Warning text.
+!end
+@end
+The note continues.
+!end
+```
+
+### Diagnostics and strict mode
+
+The compiler reports line-numbered warnings for unmatched, mismatched and
+unclosed blocks, and returns structured `diagnostics` alongside `warnings`.
+Ordinary compilation remains permissive for older WMD files.
+Use `--strict` to stop compilation when these structural errors occur:
+
+```bash
+node wmd-compiler.js --strict notes.wmd
+```
+
+Programmatically, pass `{ strict: true }` to `compile()` or `renderFragment()`.
+
+### Literal delimiters and escaping
+
+Prefix a marker with a backslash to write it literally in inline WMD:
+`\*not bold*`, `\_not italic_`, `\[[fig:example]]`,
+`\[^example]`, `\{{variable}}` or `\@collapse`. To show a
+whole example without interpreting any directives, use a fenced code block.
+Special syntax inside fenced code is never compiled as WMD.
+
 ### Lists and line breaks
 
 Consecutive list items are typeset compactly (including their line-height); a blank line between items creates extra vertical spacing:
