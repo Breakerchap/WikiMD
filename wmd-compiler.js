@@ -3,6 +3,8 @@ const fs = require("fs");
 const http = require("http");
 const path = require("path");
 const MarkdownIt = require("markdown-it");
+const { startDirective, endDirective, matchesEnd, findBlockEnd, validateBlocks } = require("./wmd-structure.js");
+const { createTargetRegistry, registerTargets, extractNotes, createNoteState, renderNotes, installAnnotations } = require("./wmd-annotations.js");
 
 const DEFAULT_PORT = 4312;
 const WATCH_DEBOUNCE_MS = 120;
@@ -453,21 +455,13 @@ function calloutPlugin(md) {
     const type = match[1].toLowerCase();
     if (type === "end") return false;
 
-    let nextLine = startLine + 1;
+    const nextLine = findBlockEnd(state, startLine, endLine, "callout");
+    if (nextLine < 0) return false;
     const contentLines = [];
-
-    while (nextLine < endLine) {
-      const pos = state.bMarks[nextLine] + state.tShift[nextLine];
-      const lineMax = state.eMarks[nextLine];
-      const text = state.src.slice(pos, lineMax);
-
-      if (text.trim() === "!end") break;
-
-      contentLines.push(text);
-      nextLine++;
+    for (let i = startLine + 1; i < nextLine; i++) {
+      const pos = state.bMarks[i] + state.tShift[i];
+      contentLines.push(state.src.slice(pos, state.eMarks[i]));
     }
-
-    if (nextLine >= endLine) return false;
     if (silent) return true;
 
     const open = state.push("wmd_callout_open", "div", 1);
@@ -519,37 +513,13 @@ function collapsePlugin(md) {
 
     if (!match) return false;
 
-    let nextLine = startLine + 1;
-    let depth = 1;
-    let fence = null;
+    const nextLine = findBlockEnd(state, startLine, endLine, "collapse");
+    if (nextLine < 0) return false;
     const contentLines = [];
-
-    while (nextLine < endLine) {
-      const pos = state.bMarks[nextLine] + state.tShift[nextLine];
-      const lineMax = state.eMarks[nextLine];
-      const text = state.src.slice(pos, lineMax);
-      const trimmed = text.trim();
-
-      // A fenced code example can contain literal collapse directives.
-      if (fence) {
-        if (isFenceEnd(text, fence)) fence = null;
-      } else {
-        const openingFence = getFenceStart(text);
-        if (openingFence) {
-          fence = openingFence;
-        } else if (/^@collapse(?:\s+(.+))?$/.test(trimmed)) {
-          depth++;
-        } else if (trimmed === "@endcollapse") {
-          depth--;
-          if (depth === 0) break;
-        }
-      }
-
-      contentLines.push(text);
-      nextLine++;
+    for (let i = startLine + 1; i < nextLine; i++) {
+      const pos = state.bMarks[i] + state.tShift[i];
+      contentLines.push(state.src.slice(pos, state.eMarks[i]));
     }
-
-    if (nextLine >= endLine) return false;
     if (silent) return true;
 
     const open = state.push("wmd_collapse_open", "details", 1);
@@ -934,7 +904,7 @@ function parseWmd(source) {
       continue;
     }
 
-    if (line.trim() === "@endconfig") {
+    if (line.trim() === "@endconfig" || (inConfig && line.trim() === "@end")) {
       inConfig = false;
       continue;
     }
@@ -1104,7 +1074,7 @@ function prepareStyleMarkers(markdown, stylePresets = {}) {
   const lines = String(markdown || "").split(/\r?\n/);
   const markers = new Map();
   const customPresets = customMarkerPresets(stylePresets);
-  let currentStyle = "";
+  const stack = [];
   let fence = null;
 
   const prepared = lines.map((line, index) => {
@@ -1112,30 +1082,29 @@ function prepareStyleMarkers(markdown, stylePresets = {}) {
       if (isFenceEnd(line, fence)) fence = null;
       return line;
     }
-
     const openingFence = getFenceStart(line);
     if (openingFence) {
       fence = openingFence;
       return line;
     }
 
-    const start = line.trim().match(/^@style\s+(.+?)\s*$/i);
+    const start = startDirective(line), end = endDirective(line);
     if (start) {
-      currentStyle = normalizeStyleName(start[1]);
-      return "";
+      stack.push(start.kind === "style"
+        ? { kind: "style", name: normalizeStyleName(line.trim().slice("@style".length)) }
+        : { kind: start.kind });
+      if (start.kind === "style") return "";
+    } else if (end && stack.length && matchesEnd(stack[stack.length - 1].kind, end)) {
+      const closing = stack.pop();
+      if (closing.kind === "style") return "";
     }
-
-    if (/^@end(?:style)?\s*$/i.test(line.trim())) {
-      currentStyle = "";
-      return "";
-    }
-
+    const style = [...stack].reverse().find(item => item.kind === "style");
+    const currentStyle = style ? style.name : "";
     const custom = !currentStyle ? applyCustomMarkerLine(line, customPresets) : null;
     if (custom) {
       markers.set(index, custom.preset);
       return custom.markdown;
     }
-
     if (line.trim() && currentStyle) markers.set(index, currentStyle);
     return line;
   });
@@ -1263,7 +1232,7 @@ function resolveIncludes(markdown, tabsBySlug, warnings, sourceTabName, stack = 
 }
 
 function applyVars(markdown, vars, warnings, sourceTabName) {
-  return transformOutsideFencedCode(markdown, (line) => line.replace(/\{\{([A-Za-z][\w-]*)\}\}/g, (match, name) => {
+  return transformOutsideFencedCode(markdown, (line) => line.replace(/(?<!\\)\{\{([A-Za-z][\w-]*)\}\}/g, (match, name) => {
     if (Object.prototype.hasOwnProperty.call(vars, name)) {
       return vars[name];
     }
@@ -1455,15 +1424,13 @@ function tabStopsPlugin(md) {
       }
       return false;
     }
+    const end = findBlockEnd(state, startLine, endLine, "tabstops");
+    if (end < 0) return false;
     const rows = [];
-    let end = startLine + 1;
-    while (end < endLine) {
-      const row = state.src.slice(state.bMarks[end] + state.tShift[end], state.eMarks[end]);
-      if (row.trim() === "@endtabstops") break;
-      rows.push(row);
-      end++;
+    for (let i = startLine + 1; i < end; i++) {
+      const pos = state.bMarks[i] + state.tShift[i];
+      rows.push(state.src.slice(pos, state.eMarks[i]));
     }
-    if (end >= endLine) return false;
     if (silent) return true;
 
     const open = state.push("wmd_tab_stops_open", "div", 1);
@@ -1520,6 +1487,7 @@ function makeMarkdownIt(options = {}) {
   md.use(calloutPlugin);
   md.use(collapsePlugin);
   md.use(tocPlugin);
+  md.use(installAnnotations);
 
   return md;
 }
@@ -1585,7 +1553,7 @@ function parseFragmentSource(source) {
       continue;
     }
 
-    if (line.trim() === "@endconfig") {
+    if (line.trim() === "@endconfig" || (inConfig && line.trim() === "@end")) {
       inConfig = false;
       continue;
     }
@@ -1614,6 +1582,7 @@ function parseFragmentSource(source) {
 }
 
 function renderFragment(source, options = {}) {
+  const diagnostics = validateBlocks(source, { strict: options.strict === true });
   const parsed = parseFragmentSource(String(source || ""));
   const warnings = [...parsed.warnings];
   const withVars = applyVars(parsed.markdown, parsed.vars, warnings, "document");
@@ -1628,6 +1597,8 @@ function renderFragment(source, options = {}) {
     resolvedContent: math.markdown,
   };
 
+  const targets = createTargetRegistry();
+  registerTargets(tab.resolvedContent, 'document', targets, warnings);
   tab.headings = collectHeadings(md, tab, parsed.config);
 
   const headingAnchors = new Map();
@@ -1642,13 +1613,15 @@ function renderFragment(source, options = {}) {
     currentTabName: tab.name,
     currentTabSlug: tab.refSlug,
     currentTabHeadings: tab.headings,
+    targets,
     stylePresets: parsed.config.stylePresets,
   }, parsed.config);
 
   return {
     html: restoreMathDelimiters(html, math.values),
     css: stylePresetCss(parsed.config.stylePresets),
-    warnings: uniqueWarnings(warnings),
+    warnings: uniqueWarnings([...warnings, ...diagnostics.map(d => 'line ' + d.line + ': ' + d.message)]),
+    diagnostics,
   };
 }
 
@@ -1656,14 +1629,16 @@ function renderTab(md, tab, env, config) {
   const insertedBlankLines = new Set();
   const separated = separateListFollowingText(tab.resolvedContent, insertedBlankLines);
   const prepared = prepareStyleMarkers(separated, config.stylePresets);
-  const tokens = md.parse(prepared.markdown, env);
-  markListSpacing(tokens, prepared.markdown, insertedBlankLines);
+  const notes = extractNotes(prepared.markdown, env.warnings);
+  env.noteState = createNoteState(notes.definitions, tab.domId, env.warnings);
+  const tokens = md.parse(notes.markdown, env);
+  markListSpacing(tokens, notes.markdown, insertedBlankLines);
   applyHeadingIdsToTokens(tokens, tab.headings);
   applyPresetMarkersToTokens(tokens, prepared.markers);
-  return md.renderer.render(tokens, md.options, env);
+  return md.renderer.render(tokens, md.options, env) + renderNotes(md, env);
 }
 
-function renderTabSection(md, tab, tabs, warnings, config, active = false) {
+function renderTabSection(md, tab, tabs, warnings, config, targets, active = false) {
   const allHeadings = tabs.flatMap((candidate) => candidate.headings);
   const headingAnchors = new Map();
   const tabAnchors = new Map();
@@ -1682,6 +1657,7 @@ function renderTabSection(md, tab, tabs, warnings, config, active = false) {
     currentTabName: tab.name,
     currentTabSlug: tab.refSlug,
     currentTabHeadings: tab.headings,
+    targets,
     stylePresets: config.stylePresets,
   }, config);
   const titleHtml = tab.title
@@ -1695,7 +1671,7 @@ ${rendered}
 </section>`;
 }
 
-function buildHtml(config, tabs, warnings) {
+function buildHtml(config, tabs, warnings, targets) {
   const presetCss = stylePresetCss(config.stylePresets);
   const allHeadings = tabs.flatMap((tab) => tab.headings);
   const visibleTabs = tabs.filter((tab) => !tab.hidden);
@@ -1730,7 +1706,7 @@ function buildHtml(config, tabs, warnings) {
     .join("\n");
 
   const tabSections = tabs
-    .map((tab) => renderTabSection(md, tab, tabs, warnings, config, tab.domId === firstActiveTabId))
+    .map((tab) => renderTabSection(md, tab, tabs, warnings, config, targets, tab.domId === firstActiveTabId))
     .join("\n");
 
   const finalWarnings = uniqueWarnings(warnings);
@@ -2459,9 +2435,10 @@ ${finalWarnings.map((warning) => `<p>${escapeHtml(warning)}</p>`).join("\n")}
   return { html, warnings: finalWarnings };
 }
 
-function prepareDocument(source) {
+function prepareDocument(source, options = {}) {
+  const diagnostics = validateBlocks(source, { strict: options.strict === true });
   const { config, vars, tabs } = parseWmd(source);
-  const warnings = [];
+  const warnings = diagnostics.map(d => 'line ' + d.line + ': ' + d.message);
   const tabsBySlug = finalizeTabs(tabs, warnings);
   const md = makeMarkdownIt();
 
@@ -2470,27 +2447,27 @@ function prepareDocument(source) {
     tab.resolvedContent = applyVars(withIncludes, vars, warnings, tab.name);
   }
 
-  for (const tab of tabs) {
-    tab.headings = collectHeadings(md, tab, config);
-  }
+  const targets = createTargetRegistry();
+  for (const tab of tabs) registerTargets(tab.resolvedContent, tab.domId, targets, warnings);
+  for (const tab of tabs) tab.headings = collectHeadings(md, tab, config);
 
-  return { config, tabs, warnings };
+  return { config, tabs, warnings, diagnostics, targets };
 }
 
-function compile(source) {
-  const prepared = prepareDocument(String(source || ""));
-  return buildHtml(prepared.config, prepared.tabs, prepared.warnings);
+function compile(source, options = {}) {
+  const prepared = prepareDocument(String(source || ""), options);
+  return { ...buildHtml(prepared.config, prepared.tabs, prepared.warnings, prepared.targets), diagnostics: prepared.diagnostics };
 }
 
 function ensureParentDirectory(filePath) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
 }
 
-function compileFile(inputPath, outputPath) {
+function compileFile(inputPath, outputPath, options = {}) {
   const resolvedInput = path.resolve(inputPath);
   const resolvedOutput = path.resolve(outputPath);
   const source = fs.readFileSync(resolvedInput, "utf8");
-  const result = compile(source);
+  const result = compile(source, options);
 
   ensureParentDirectory(resolvedOutput);
   fs.writeFileSync(resolvedOutput, result.html, "utf8");
@@ -2631,7 +2608,7 @@ function startPreviewServer(options) {
   };
 
   try {
-    const result = compileFile(inputPath, outputPath);
+    const result = compileFile(inputPath, outputPath, options);
     currentHtml = result.html;
     reportCompile(result, inputPath, outputPath);
   } catch (error) {
@@ -2643,6 +2620,7 @@ function startPreviewServer(options) {
     outputPath,
     onSuccess: handleSuccess,
     onError: handleError,
+    strict: options.strict,
   });
 
   const server = http.createServer((request, response) => {
@@ -2734,6 +2712,7 @@ Options:
   --watch, -w   Recompile when the input file changes
   --serve, -s   Start a local preview server with live reload
   --port, -p    Preview server port (default: ${DEFAULT_PORT})
+  --strict      Fail on unmatched or unclosed blocks
   --help, -h    Show this help text
 
 Examples:
@@ -2750,6 +2729,7 @@ function parseArgs(argv) {
     serve: false,
     port: DEFAULT_PORT,
     help: false,
+    strict: false,
   };
 
   const positional = [];
@@ -2761,6 +2741,8 @@ function parseArgs(argv) {
       options.help = true;
       continue;
     }
+
+    if (arg === "--strict") { options.strict = true; continue; }
 
     if (arg === "--watch" || arg === "-w") {
       options.watch = true;
@@ -2851,12 +2833,13 @@ function runCli(argv = process.argv.slice(2)) {
       inputPath: options.inputPath,
       outputPath: options.outputPath,
       port: options.port,
+      strict: options.strict,
     });
     return;
   }
 
   try {
-    const result = compileFile(options.inputPath, options.outputPath);
+    const result = compileFile(options.inputPath, options.outputPath, options);
     reportCompile(result, options.inputPath, options.outputPath);
   } catch (error) {
     reportCompileError(error, options.inputPath);
@@ -2877,6 +2860,7 @@ function runCli(argv = process.argv.slice(2)) {
     onSuccess: (result) => {
       reportCompile(result, options.inputPath, options.outputPath);
     },
+    strict: options.strict,
     onError: (error) => {
       reportCompileError(error, options.inputPath);
     },
