@@ -28,7 +28,7 @@ function matchesEnd(kind, end) {
 }
 
 function fenceStart(line) {
-  const match = String(line).match(/^ {0,3}(''|`{3,}|~{3,})(.*)$/);
+  const match = String(line).match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
   if (!match) return null;
   return { marker: match[1][0], length: match[1].length };
 }
