@@ -115,6 +115,24 @@ This line can still contain *bold text* or <<a mentioned phrase>>.
 ]]]
 ```
 
+### Nested collapsible sections
+
+Put one `@collapse` block inside another to create nested sections.
+Each `@endcollapse` closes the innermost open section. Any number of
+levels is supported, and blocks may also follow one another without blank lines.
+
+```wmd
+@collapse More details
+The outer section starts here.
+
+@collapse Further details
+This text is hidden inside both sections.
+@endcollapse
+
+Back inside the outer section.
+@endcollapse
+```
+
 ### Lists and line breaks
 
 Consecutive list items are typeset compactly (including their line-height); a blank line between items creates extra vertical spacing:
