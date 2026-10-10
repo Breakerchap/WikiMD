@@ -2701,7 +2701,9 @@ function reportCompile(result, inputPath, outputPath) {
 
   if (result.warnings.length) {
     for (const warning of result.warnings) {
-      console.warn(`warning ${formatPathForLog(inputPath)}: ${warning}`);
+      const located = warning.match(/^line (\d+): (.*)$/);
+      if (located) console.warn(`warning ${formatPathForLog(inputPath)}:${located[1]}: ${located[2]}`);
+      else console.warn(`warning ${formatPathForLog(inputPath)}: ${warning}`);
     }
   }
 }
@@ -2709,7 +2711,9 @@ function reportCompile(result, inputPath, outputPath) {
 function reportCompileError(error, inputPath = "") {
   const message = error && error.message ? error.message : String(error);
   const prefix = inputPath ? `error ${formatPathForLog(inputPath)}:` : "error:";
-  console.error(`${prefix} ${message}`);
+  const annotated = inputPath ? message.replace(/(^|\n)line (\d+): /g,
+    (whole, lead, line) => lead + formatPathForLog(inputPath) + ":" + line + ": ") : message;
+  console.error(`${prefix} ${annotated}`);
 }
 
 function printHelp() {
