@@ -180,5 +180,94 @@
       "@endtabstops"
     ],
     "description": "Create independently positioned ruler tab stops for aligned WMD content"
+  },
+  "Footnote reference": {
+    "prefix": "footnote",
+    "body": [
+      "[^${1:key}]"
+    ],
+    "description": "Insert a footnote reference"
+  },
+  "Footnote definition": {
+    "prefix": "footnote-def",
+    "body": [
+      "[^${1:key}]: ${2:Footnote text}"
+    ],
+    "description": "Define a footnote"
+  },
+  "Endnote reference": {
+    "prefix": "endnote",
+    "body": [
+      "[^end:${1:key}]"
+    ],
+    "description": "Insert an endnote reference"
+  },
+  "Endnote definition": {
+    "prefix": "endnote-def",
+    "body": [
+      "[^end:${1:key}]: ${2:Endnote text}"
+    ],
+    "description": "Define an endnote"
+  },
+  "Numbered figure": {
+    "prefix": "@figure",
+    "body": [
+      "@figure ${1:label} | ${2:Caption}",
+      "${3:Figure content}",
+      "@endfigure"
+    ],
+    "description": "Insert a numbered, referenceable figure"
+  },
+  "Numbered table": {
+    "prefix": "@table",
+    "body": [
+      "@table ${1:label} | ${2:Caption}",
+      "| Column | Value |",
+      "| ------ | ----- |",
+      "| ${3:Row} | ${4:Cell} |",
+      "@endtable"
+    ],
+    "description": "Insert a numbered, referenceable table"
+  },
+  "Numbered equation": {
+    "prefix": "@equation",
+    "body": [
+      "@equation ${1:label} | ${2:Caption}",
+      "$$${3:x = y}$$",
+      "@endequation"
+    ],
+    "description": "Insert a numbered equation"
+  },
+  "Figure cross-reference": {
+    "prefix": "figref",
+    "body": [
+      "[[fig:${1:label}]]"
+    ],
+    "description": "Refer to a numbered figure"
+  },
+  "Table cross-reference": {
+    "prefix": "tblref",
+    "body": [
+      "[[tbl:${1:label}]]"
+    ],
+    "description": "Refer to a numbered table"
+  },
+  "Equation cross-reference": {
+    "prefix": "eqref",
+    "body": [
+      "[[eq:${1:label}]]"
+    ],
+    "description": "Refer to a numbered equation"
+  },
+  "Nested callout": {
+    "prefix": "nested-callout",
+    "body": [
+      "!note ${1:Outer}",
+      "!warning ${2:Inner}",
+      "${3:Content}",
+      "!end",
+      "!end"
+    ],
+    "description": "Insert nested callouts"
   }
 }
